@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aviation Compliance RAG</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f9; margin: 0; padding: 20px; display: flex; justify-content: center; }
+        .container { width: 100%; max-width: 800px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        h2 { color: #333; margin-top: 0; }
+        .controls { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
+        select, button { padding: 10px; font-size: 14px; border-radius: 4px; border: 1px solid #ccc; }
+        select { flex: 1; min-width: 160px; }
+        .fast-mode-label { font-size: 13px; color: #555; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+        .chat-box { height: 450px; border: 1px solid #ddd; border-radius: 4px; padding: 15px; overflow-y: scroll; background: #fafafa; margin-bottom: 15px; display: flex; flex-direction: column; gap: 10px; }
+        .message { padding: 10px 14px; border-radius: 6px; max-width: 85%; line-height: 1.4; }
+        .user-msg { background: #007bff; color: white; align-self: flex-end; }
+        .bot-msg { background: #e2e8f0; color: #333; align-self: flex-start; white-space: pre-wrap; }
+        .bot-msg.needs-review { background: #fff3cd; border: 1px solid #ffc107; }
+        .review-badge { display: inline-block; background: #ffc107; color: #333; font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 10px; margin-bottom: 6px; }
+        .input-area { display: flex; gap: 10px; }
+        input[type="text"] { flex: 1; padding: 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+        button#send-btn { background: #28a745; color: white; border: none; cursor: pointer; padding: 0 20px; font-weight: bold; }
+        button#send-btn:hover { background: #218838; }
+        .sources { font-size: 12px; color: #666; margin-top: 8px; border-top: 1px dashed #ccc; padding-top: 5px; white-space: pre-wrap; }
+        details.findings { margin-top: 8px; font-size: 12px; color: #444; }
+        details.findings summary { cursor: pointer; font-weight: bold; color: #007bff; }
+        details.findings .finding-block { margin-top: 6px; padding: 6px 8px; background: #f8f9fa; border-left: 3px solid #ccc; white-space: pre-wrap; }
+        .meta-line { font-size: 11px; color: #999; margin-top: 6px; }
+    </style>
+</head>
+<body>  
+
+<div class="container">
+    <h2>✈️ Multi-Authority Aviation Compliance RAG</h2>
+    
+    <div class="controls">
+        <label for="authority-select" style="font-weight: bold;">Authority Filter:</label>
+        <select id="authority-select">
+            <option value="ALL">ALL (EASA, CAAS, CAAC)</option>
+            <option value="EASA">EASA only</option>
+            <option value="CAAS">CAAS only</option>
+            <option value="CAAC">CAAC only</option>
+        </select>
+        <label class="fast-mode-label">
+            <input type="checkbox" id="fast-mode-checkbox" />
+            Fast mode (skip verification)
+        </label>
+    </div>
+
+    <div class="chat-box" id="chat-box">
+        <div class="message bot-msg">System ready. Ask any regulatory compliance question regarding EASA, CAAS, or CAAC documents.</div>
+    </div>
+
+    <div class="input-area">
+        <input type="text" id="user-input" placeholder="Type your compliance question here..." />
+        <button id="send-btn" onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<script>
+    async function sendMessage() {
+        const inputField = document.getElementById("user-input");
+        const chatBox = document.getElementById("chat-box");
+        const authoritySelect = document.getElementById("authority-select");
+        const fastModeCheckbox = document.getElementById("fast-mode-checkbox");
+        
+        const question = inputField.value.trim();
+        if (!question) return;
+
+        chatBox.innerHTML += `<div class="message user-msg">${escapeHtml(question)}</div>`;
+        inputField.value = "";
+        chatBox.scrollTop = chatBox.scrollHeight;
+
+        const loadingId = "loading-" + Date.now();
+        chatBox.innerHTML += `<div class="message bot-msg" id="${loadingId}">Analyzing regulations locally...</div>`;
+        chatBox.scrollTop = chatBox.scrollHeight;
+
+        try {
+            const response = await fetch("/api/query", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    question: question,
+                    authority: authoritySelect.value,
+                    skip_verification: fastModeCheckbox.checked
+                })
+            });
+
+            const data = await response.json();
+            const loadingMsg = document.getElementById(loadingId);
+
+            if (response.ok) {
+                renderAnswer(loadingMsg, data);
+            } else {
+                loadingMsg.innerText = `Error: ${data.detail || "Failed to retrieve response"}`;
+            }
+        } catch (err) {
+            document.getElementById(loadingId).innerText = `Network Error: Could not connect to local server.`;
+        }
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function renderAnswer(el, data) {
+        if (data.needs_review) {
+            el.classList.add("needs-review");
+        }
+
+        let html = "";
+        if (data.needs_review) {
+            html += `<div class="review-badge">⚠️ Needs human review</div>`;
+        }
+        html += escapeHtml(data.answer);
+
+        if (data.sources) {
+            html += `<div class="sources"><strong>Sources:</strong><br>${escapeHtml(data.sources)}</div>`;
+        }
+
+        if (data.authority_findings && Object.keys(data.authority_findings).length > 0) {
+            html += `<details class="findings"><summary>Per-authority findings</summary>`;
+            for (const [authority, finding] of Object.entries(data.authority_findings)) {
+                html += `<div class="finding-block"><strong>${escapeHtml(authority)}</strong><br>${escapeHtml(finding)}</div>`;
+            }
+            html += `</details>`;
+        }
+
+        const retries = data.retry_count || 0;
+        const authorities = (data.relevant_authorities || []).join(", ");
+        html += `<div class="meta-line">Authorities checked: ${escapeHtml(authorities)} · Retries: ${retries}</div>`;
+
+        el.innerHTML = html;
+    }
+
+    document.getElementById("user-input").addEventListener("keypress", function (e) {
+        if (e.key === "Enter") {
+            sendMessage();
+        }
+    });
+
+    function escapeHtml(text) {
+        const div = document.createElement("div");
+        div.textContent = text;
+        return div.innerHTML;
+    }
+</script>
+
+</body>
+</html>

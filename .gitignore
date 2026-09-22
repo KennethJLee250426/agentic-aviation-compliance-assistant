@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Vector DB (regenerate via ingest.py)
+regulatory_chroma_db/
+
+# Regulatory source documents — likely copyrighted/restricted, do not
+# publish. Only .gitkeep placeholders are tracked.
+regulations/easa/*
+regulations/caas/*
+regulations/caac/*
+!regulations/easa/.gitkeep
+!regulations/caas/.gitkeep
+!regulations/caac/.gitkeep
+
+# Environment/secrets
+.env
+
+# OS/editor cruft
+.DS_Store
+.vscode/
