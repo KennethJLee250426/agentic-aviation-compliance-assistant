@@ -1,8 +1,6 @@
-import logging
 import os
-import uuid
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
@@ -52,9 +50,15 @@ async def health_live():
 
 @app.get("/health/ready")
 async def health_ready():
+    if vectorstore is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector store is not loaded",
+        )
+
     return {
-        "status": "ok",
-        "vectorstore_loaded": vectorstore is not None,
+        "status": "ready",
+        "vectorstore_loaded": True,
         "auth_required": settings.auth_required,
         "corpus_version": settings.corpus_version,
     }
@@ -89,12 +93,7 @@ async def query_rag(req: QueryRequest, auth=Depends(optional_auth)):
             },
         }
     except Exception:
-        error_id = str(uuid.uuid4())
-        logging.exception("Query failed: %s", error_id)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Request failed. Reference ID: {error_id}",
-        )
+        raise HTTPException(status_code=500, detail="Request failed. See server logs.")
 
 
 if __name__ == "__main__":
