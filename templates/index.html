@@ -8,17 +8,17 @@
         :root {
             --primary: #0f172a;
             --primary-light: #1e293b;
-            --accent: #2563eb;
-            --accent-hover: #1d4ed8;
-            --bg-color: #f8fafc;
+            --accent: #0284c7; /* Professional aerospace sky blue */
+            --accent-hover: #0369a1;
+            --bg-color: #f1f5f9;
             --card-bg: #ffffff;
             --text-main: #334155;
             --text-muted: #64748b;
-            --border-color: #e2e8f0;
+            --border-color: #cbd5e1;
             --warning-bg: #fffbeb;
             --warning-border: #fcd34d;
-            --user-msg-bg: #2563eb;
-            --bot-msg-bg: #f1f5f9;
+            --user-msg-bg: #0284c7;
+            --bot-msg-bg: #f8fafc;
         }
 
         body {
@@ -26,75 +26,120 @@
             background-color: var(--bg-color);
             color: var(--text-main);
             margin: 0;
-            padding: 30px 20px;
+            padding: 40px 20px;
             display: flex;
             justify-content: center;
-        }
-
-        .container {
-            width: 100%;
-            max-width: 900px;
-            background: var(--card-bg);
-            padding: 24px 28px;
-            border-radius: 12px;
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
-            border: 1px solid var(--border-color);
-        }
-
-        .header {
-            display: flex;
             align-items: center;
-            justify-content: space-between;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 16px;
-            margin-bottom: 20px;
+            min-height: 100vh;
+            box-sizing: border-box;
         }
 
-        h2 {
-            color: var(--primary);
-            margin: 0;
-            font-size: 20px;
+        /* Master Dashboard Frame inspired by MRO ERP layouts */
+        .workspace-frame {
+            width: 100%;
+            max-width: 1050px;
+            background: var(--card-bg);
+            border-radius: 16px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Top Banner Branding Header */
+        .top-banner {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #ffffff;
+            padding: 20px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 3px solid var(--accent);
+        }
+
+        .brand-area {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .brand-title {
+            font-size: 18px;
             font-weight: 700;
+            letter-spacing: 0.5px;
             display: flex;
             align-items: center;
             gap: 10px;
         }
 
-        .badge-system {
+        .brand-tagline {
             font-size: 11px;
-            background: #e0f2fe;
-            color: #0369a1;
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-weight: 600;
+            color: #94a3b8;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 1.5px;
+            font-weight: 600;
         }
 
-        .controls {
+        .system-badge {
+            font-size: 11px;
+            background: rgba(2, 132, 199, 0.2);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        /* Main Content Container */
+        .content-body {
+            padding: 25px 30px;
+            background: #ffffff;
+            position: relative;
+        }
+
+        /* Subtle Background Turbine Watermark Motif */
+        .content-body::before {
+            content: "";
+            position: absolute;
+            right: -50px;
+            bottom: -50px;
+            width: 350px;
+            height: 350px;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='100' cy='100' r='80' fill='none' stroke='%23f1f5f9' stroke-width='2' stroke-dasharray='4 4'/%3E%3Ccircle cx='100' cy='100' r='50' fill='none' stroke='%23f1f5f9' stroke-width='1.5'/%3E%3Ccircle cx='100' cy='100' r='20' fill='%23f8fafc' stroke='%23e2e8f0' stroke-width='2'/%3E%3Cpath d='M100 20 L100 180 M20 100 L180 100 M44 44 L156 156 M44 156 L156 44' stroke='%23f1f5f9' stroke-width='1'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            opacity: 0.6;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .controls-panel {
             display: flex;
             gap: 16px;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             align-items: center;
             flex-wrap: wrap;
-            background: #f8fafc;
-            padding: 12px 16px;
+            background: var(--bg-color);
+            padding: 14px 18px;
             border-radius: 8px;
             border: 1px solid var(--border-color);
+            position: relative;
+            z-index: 1;
         }
 
         .control-group {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
             flex: 1;
-            min-width: 220px;
+            min-width: 240px;
         }
 
         label {
             font-weight: 600;
             font-size: 13px;
-            color: var(--text-main);
+            color: var(--primary);
         }
 
         select, button, input[type="text"] {
@@ -115,7 +160,7 @@
 
         select:focus, input[type="text"]:focus {
             border-color: var(--accent);
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+            box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
         }
 
         .fast-mode-label {
@@ -126,6 +171,7 @@
             gap: 8px;
             cursor: pointer;
             user-select: none;
+            font-weight: 500;
         }
 
         .fast-mode-label input[type="checkbox"] {
@@ -135,18 +181,47 @@
             cursor: pointer;
         }
 
+        /* Preset Prompt Chips */
+        .preset-chips {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            position: relative;
+            z-index: 1;
+        }
+
+        .chip {
+            font-size: 12px;
+            background: #e0f2fe;
+            color: #0369a1;
+            border: 1px solid #bae6fd;
+            padding: 6px 12px;
+            border-radius: 16px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+
+        .chip:hover {
+            background: #bae6fd;
+            border-color: #7dd3fc;
+        }
+
         .chat-box {
-            height: 500px;
+            height: 440px;
             border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 20px;
             overflow-y: auto;
             background: #ffffff;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             display: flex;
             flex-direction: column;
             gap: 16px;
-            box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.01);
+            position: relative;
+            z-index: 1;
+            box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.02);
         }
 
         .message {
@@ -168,7 +243,7 @@
             color: white;
             align-self: flex-end;
             border-bottom-right-radius: 2px;
-            box-shadow: 0 2px 5px rgba(37, 99, 235, 0.2);
+            box-shadow: 0 2px 5px rgba(2, 132, 199, 0.2);
         }
 
         .bot-msg {
@@ -203,6 +278,9 @@
         .input-area {
             display: flex;
             gap: 12px;
+            align-items: center;
+            position: relative;
+            z-index: 1;
         }
 
         input[type="text"] {
@@ -219,33 +297,33 @@
             color: white;
             border: none;
             cursor: pointer;
-            padding: 0 24px;
+            padding: 12px 24px;
             font-weight: 600;
             border-radius: 8px;
             transition: background 0.2s, transform 0.1s;
-            display: flex;
-            align-items: center;
-            gap: 8px;
         }
 
         button#send-btn:hover {
             background: var(--accent-hover);
         }
 
-        button#send-btn:active {
-            transform: scale(0.98);
-        }
-
-        .sources {
-            font-size: 12px;
+        button#clear-btn {
+            background: #f1f5f9;
             color: var(--text-muted);
-            margin-top: 12px;
-            border-top: 1px solid var(--border-color);
-            padding-top: 10px;
-            white-space: pre-wrap;
+            border: 1px solid var(--border-color);
+            cursor: pointer;
+            padding: 12px 16px;
+            font-weight: 600;
+            border-radius: 8px;
+            transition: all 0.2s;
         }
 
-        details.findings {
+        button#clear-btn:hover {
+            background: #e2e8f0;
+            color: var(--primary);
+        }
+
+        details.sources-dropdown, details.findings {
             margin-top: 12px;
             font-size: 12px;
             color: var(--text-main);
@@ -255,23 +333,22 @@
             border: 1px solid var(--border-color);
         }
 
-        details.findings summary {
+        details summary {
             cursor: pointer;
             font-weight: 600;
             color: var(--accent);
             outline: none;
         }
 
-        details.findings .finding-block {
+        details .content-block {
             margin-top: 8px;
             padding: 8px 10px;
             background: white;
             border-radius: 4px;
             border-left: 3px solid var(--accent);
-            border-top: 1px solid var(--border-color);
-            border-right: 1px solid var(--border-color);
-            border-bottom: 1px solid var(--border-color);
+            border: 1px solid var(--border-color);
             white-space: pre-wrap;
+            color: var(--text-muted);
         }
 
         .meta-line {
@@ -280,45 +357,71 @@
             margin-top: 8px;
             display: flex;
             gap: 8px;
-            align-items: center;
         }
     </style>
 </head>
 <body>  
 
-<div class="container">
-    <div class="header">
-        <h2>✈️ Multi-Authority Aviation Compliance RAG</h2>
-        <span class="badge-system">Enterprise POC</span>
+<div class="workspace-frame">
+    <!-- Top MRO Banner Header -->
+    <div class="top-banner">
+        <div class="brand-area">
+            <div class="brand-title">
+                ✈️ MULTI-AUTHORITY AVIATION COMPLIANCE RAG
+            </div>
+            <div class="brand-tagline">Propelling the Future of Aviation MRO Quality &amp; Safety</div>
+        </div>
+        <span class="system-badge">Open-Source Engine</span>
     </div>
     
-    <div class="controls">
-        <div class="control-group">
-            <label for="authority-select">Authority Filter:</label>
-            <select id="authority-select">
-                <option value="ALL">ALL (EASA, CAAS, CAAC)</option>
-                <option value="EASA">EASA only</option>
-                <option value="CAAS">CAAS only</option>
-                <option value="CAAC">CAAC only</option>
-            </select>
+    <div class="content-body">
+        <div class="controls-panel">
+            <div class="control-group">
+                <label for="authority-select">Authority Filter:</label>
+                <select id="authority-select">
+                    <option value="ALL">ALL (EASA, CAAS, CAAC)</option>
+                    <option value="EASA">EASA only</option>
+                    <option value="CAAS">CAAS only</option>
+                    <option value="CAAC">CAAC only</option>
+                </select>
+            </div>
+            <label class="fast-mode-label">
+                <input type="checkbox" id="fast-mode-checkbox" />
+                Fast mode (skip verification)
+            </label>
         </div>
-        <label class="fast-mode-label">
-            <input type="checkbox" id="fast-mode-checkbox" />
-            Fast mode (skip verification)
-        </label>
-    </div>
 
-    <div class="chat-box" id="chat-box">
-        <div class="message bot-msg">System ready. Ask any regulatory compliance question regarding EASA, CAAS, or CAAC documents.</div>
-    </div>
+        <!-- Quick Prompt Suggestions -->
+        <div class="preset-chips">
+            <span style="font-size: 12px; font-weight: 600; color: var(--text-muted); align-self: center;">Quick queries:</span>
+            <div class="chip" onclick="setQuery('What are the EASA Part-IS security requirements?')">EASA Part-IS security</div>
+            <div class="chip" onclick="setQuery('Compare quality management roles across authorities')">Role comparison</div>
+            <div class="chip" onclick="setQuery('What are the CAAS continuing airworthiness standards?')">CAAS airworthiness</div>
+        </div>
 
-    <div class="input-area">
-        <input type="text" id="user-input" placeholder="Type your compliance question here..." />
-        <button id="send-btn" onclick="sendMessage()">Send</button>
+        <div class="chat-box" id="chat-box">
+            <div class="message bot-msg">System ready. Ask any regulatory compliance question regarding EASA, CAAS, or CAAC documents[cite: 8].</div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="Type your compliance question here..." />
+            <button id="clear-btn" onclick="clearChat()" title="Clear Chat History">Clear</button>
+            <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
     </div>
 </div>
 
 <script>
+    function setQuery(text) {
+        document.getElementById("user-input").value = text;
+        document.getElementById("user-input").focus();
+    }
+
+    function clearChat() {
+        const chatBox = document.getElementById("chat-box");
+        chatBox.innerHTML = `<div class="message bot-msg">Chat cleared. System ready for new queries.</div>`;
+    }
+
     async function sendMessage() {
         const inputField = document.getElementById("user-input");
         const chatBox = document.getElementById("chat-box");
@@ -373,13 +476,13 @@
         html += escapeHtml(data.answer);
 
         if (data.sources) {
-            html += `<div class="sources"><strong>Sources:</strong><br>${escapeHtml(data.sources)}</div>`;
+            html += `<details class="sources-dropdown"><summary>View source excerpts</summary><div class="content-block">${escapeHtml(data.sources)}</div></details>`;
         }
 
         if (data.authority_findings && Object.keys(data.authority_findings).length > 0) {
-            html += `<details class="findings"><summary>Per-authority findings</summary>`;
+            html += `<details class="findings"><summary>Per-authority specialist findings</summary>`;
             for (const [authority, finding] of Object.entries(data.authority_findings)) {
-                html += `<div class="finding-block"><strong>${escapeHtml(authority)}</strong><br>${escapeHtml(finding)}</div>`;
+                html += `<div class="content-block" style="margin-top:6px;"><strong>${escapeHtml(authority)}</strong><br>${escapeHtml(finding)}</div>`;
             }
             html += `</details>`;
         }
@@ -397,7 +500,6 @@
         }
     });
 
-    // Clean HTML escape function
     function escapeHtml(text) {
         const div = document.createElement("div");
         div.textContent = text;
