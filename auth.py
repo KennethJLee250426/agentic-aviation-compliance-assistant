@@ -24,6 +24,10 @@ async def optional_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+# DEVELOPMENT ONLY:
+# Replace this token-length check with JWT/OIDC verification
+# before setting AUTH_REQUIRED=true in production.
+    
     token = creds.credentials
     if not token or len(token) < 8:
         raise HTTPException(
