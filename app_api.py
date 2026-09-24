@@ -11,10 +11,10 @@ app = FastAPI(title="Aviation Regulatory Agentic RAG POC")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://compliance.example.com"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -55,8 +55,21 @@ async def query_rag(req: QueryRequest):
                 for authority, finding in result["authority_findings"].items()
             },
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    import logging
+import uuid
+
+logger = logging.getLogger(__name__)
+
+try:
+    result = run_query(req.question, req.authority, req.skip_verification)
+    return {...}
+except Exception:
+    error_id = str(uuid.uuid4())
+    logger.exception("Query failed: %s", error_id)
+    raise HTTPException(
+        status_code=500,
+        detail=f"Request failed. Reference ID: {error_id}"
+    )
 
 
 if __name__ == "__main__":
