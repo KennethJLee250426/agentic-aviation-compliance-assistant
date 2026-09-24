@@ -395,9 +395,7 @@ def verify_node(state: RAGState) -> RAGState:
 
 
 def route_after_authority_agents(state: RAGState) -> str:
-    # Opt-in fast path (see run_query's skip_verification param): only
-    # takes effect when it's genuinely low-risk — single authority, that
-    # authority actually had matching docs, not a multi-hop question.
+    # Opt-in fast path...
     single_authority = state["all_relevant_authorities"]
     is_low_risk = (
         len(single_authority) == 1
@@ -417,8 +415,11 @@ def finalize_unverified_node(state: RAGState) -> RAGState:
         "context_text": finding["context"],
         "draft_answer": finding["draft"],
         "final_answer": finding["draft"],
-        "verification": {"approved": None, "reason": "Verification skipped (fast mode)."},
-        "needs_review": False,
+        "verification": {
+            "approved": None,
+            "reason": "Verification skipped (fast mode). Human review required."
+        },
+        "needs_review": True,
     }
 
 
