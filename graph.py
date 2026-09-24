@@ -32,6 +32,8 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from langgraph.graph import END, StateGraph
+
 from config import settings
 
 MAX_RETRIES = 2
@@ -48,13 +50,6 @@ worker_llm = ChatOllama(
     keep_alive="10m",
 )
 
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-vectorstore: Optional[Chroma] = (
-    Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-    if os.path.exists(DB_DIR)
-    else None
-)
-
 verifier_llm = ChatOllama(
     model=settings.verifier_model,
     base_url=settings.ollama_host,
@@ -62,6 +57,14 @@ verifier_llm = ChatOllama(
     keep_alive="10m",
     num_predict=2000,
 )
+
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vectorstore: Optional[Chroma] = (
+    Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+    if os.path.exists(DB_DIR)
+    else None
+)
+
 
 class VerificationResult(BaseModel):
     approved: bool
@@ -125,25 +128,30 @@ def extract_json(text: str) -> dict:
 
 def extract_verification_result(text: str) -> dict:
     parsed = extract_json(text)
+
     if not parsed:
-        return {}
-
-    try:
-        result = VerificationResult.model_validate(parsed)
-        return result.model_dump()
-    except ValidationError:
-        reason = str(parsed.get("reason") or "Could not parse verifier output.")
-        retry_query = str(parsed.get("retry_query") or "")
-        retry_authority = str(parsed.get("retry_authority") or "ALL").upper()
-        if retry_authority not in {"ALL", "EASA", "CAAS", "CAAC"}:
-            retry_authority = "ALL"
-
         return {
-            "approved": bool(parsed.get("approved", False)),
-            "reason": reason,
-            "retry_query": retry_query,
-            "retry_authority": retry_authority,
+            "approved": False,
+            "reason": "Could not parse verifier output.",
+            "retry_query": "",
+            "retry_authority": "ALL",
         }
+
+    retry_authority = str(
+        parsed.get("retry_authority") or "ALL"
+    ).upper()
+
+    if retry_authority not in {"ALL", "EASA", "CAAS", "CAAC"}:
+        retry_authority = "ALL"
+
+    return {
+        "approved": bool(parsed.get("approved", False)),
+        "reason": str(
+            parsed.get("reason") or "Could not parse verifier output."
+        ),
+        "retry_query": str(parsed.get("retry_query") or ""),
+        "retry_authority": retry_authority,
+    }
 
 
 def format_docs(docs: List[Document]) -> str:
@@ -204,7 +212,7 @@ def plan_node(state: RAGState) -> RAGState:
         resp = worker_llm.invoke(
             DECOMPOSE_PROMPT.invoke({"question": state["question"]})
         )
-        parsed = extract_json(resp.content)
+        parsed = extract_verification_result(resp.content)
         sub_queries = parsed.get("sub_queries") or [state["question"]]
     else:
         sub_queries = [state["question"]]
@@ -216,6 +224,7 @@ def plan_node(state: RAGState) -> RAGState:
         "relevant_authorities": relevant_authorities,
         "retry_count": 0,
         "answer_status": "PENDING",
+        "corpus_version": state.get("corpus_version", settings.corpus_version),
     }
 
 
@@ -354,10 +363,8 @@ Authorities involved:
 Check whether the claims are supported by the context, whether conflicts
 were ignored, and whether the context is sufficient.
 
-Respond ONLY with JSON:
+Then respond ONLY with JSON, no other text:
 {{"approved": true, "reason": "short explanation", "retry_query": "", "retry_authority": "ALL"}}
-"""
-)
 
 
 def verify_node(state: RAGState) -> RAGState:
@@ -400,14 +407,13 @@ def finalize_unverified_node(state: RAGState) -> RAGState:
         "context_text": finding["context"],
         "draft_answer": finding["draft"],
         "final_answer": finding["draft"],
-        "verification": {
+ "verification": {
     "approved": None,
     "reason": "Verification skipped (fast mode). Human review required.",
 },
 "needs_review": True,
 "answer_status": "REQUIRES_HUMAN_REVIEW",
-        "corpus_version": state.get("corpus_version", settings.corpus_version),
-    }
+"corpus_version": state.get("corpus_version", settings.corpus_version),
 
 
 def route_after_verify(state: RAGState) -> str:
@@ -447,11 +453,12 @@ def prep_retry_node(state: RAGState) -> RAGState:
 def finalize_node(state: RAGState) -> RAGState:
     approved = state["verification"].get("approved", False)
     answer = state["draft_answer"]
+
     if not approved:
         reason = state["verification"].get("reason", "unspecified")
         answer = (
             "⚠️ **Needs human review** — automated verification could not "
-            f"confirm this answer against source documents ({reason}).\\n\\n"
+            f"confirm this answer against source documents ({reason}).\n\n"
             + answer
         )
         return {
@@ -459,7 +466,6 @@ def finalize_node(state: RAGState) -> RAGState:
             "final_answer": answer,
             "needs_review": True,
             "answer_status": "REQUIRES_HUMAN_REVIEW",
-            "corpus_version": state.get("corpus_version", settings.corpus_version),
         }
 
     return {
@@ -467,7 +473,6 @@ def finalize_node(state: RAGState) -> RAGState:
         "final_answer": answer,
         "needs_review": False,
         "answer_status": "VERIFIED",
-        "corpus_version": state.get("corpus_version", settings.corpus_version),
     }
 
 
