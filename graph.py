@@ -41,9 +41,11 @@ AUTHORITIES = ["EASA", "CAAS", "CAAC"]
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
-worker_llm = ChatOllama(model="llama3.1:8b", temperature=0.0, keep_alive="10m")
-verifier_llm = ChatOllama(
-    model="deepseek-r1:8b", temperature=0.0, keep_alive="10m", num_predict=2000
+worker_llm = ChatOllama(
+    model=settings.worker_model,
+    base_url=settings.ollama_host,
+    temperature=0.0,
+    keep_alive="10m",
 )
 
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -53,6 +55,13 @@ vectorstore: Optional[Chroma] = (
     else None
 )
 
+verifier_llm = ChatOllama(
+    model=settings.verifier_model,
+    base_url=settings.ollama_host,
+    temperature=0.0,
+    keep_alive="10m",
+    num_predict=2000,
+)
 
 class VerificationResult(BaseModel):
     approved: bool
@@ -140,7 +149,8 @@ def extract_verification_result(text: str) -> dict:
 def format_docs(docs: List[Document]) -> str:
     return "\n\n---\n\n".join(
         f"[{doc.metadata.get('authority', 'UNKNOWN')} - "
-        f"{os.path.basename(doc.metadata.get('source', 'Unknown'))}]\\n{doc.page_content}"
+        f"{os.path.basename(doc.metadata.get('source', 'Unknown'))}]\n"
+        f"{doc.page_content}"
         for doc in docs
     )
 
@@ -173,12 +183,11 @@ def _looks_multihop(question: str) -> bool:
 
 DECOMPOSE_PROMPT = ChatPromptTemplate.from_template(
     """You are a query planner for an aviation regulatory compliance system.
-This question looks like it may need multiple retrieval passes (comparing
-requirements, or checking whether one satisfies another). Break it into
+This question looks like it may need multiple retrieval passes. Break it into
 2-4 focused sub-queries.
 
 Respond ONLY with JSON, no other text:
-{"sub_queries": ["query 1", "query 2"]}
+{{"sub_queries": ["query 1", "query 2"]}}
 
 Question: {question}
 """
@@ -331,24 +340,22 @@ def aggregate_node(state: RAGState) -> RAGState:
 
 VERIFY_PROMPT = ChatPromptTemplate.from_template(
     """You are a critical reviewer checking a draft regulatory compliance
-answer against its source context, before it goes to a QA/EHS engineer.
+answer against its source context.
 
-Context provided to the answering agents:
+Context:
 {context}
 
 Draft answer:
 {draft_answer}
 
-Authorities involved: {authorities}
+Authorities involved:
+{authorities}
 
-Check:
-1. Does every specific claim (clause numbers, requirements, dates) in the
-draft actually appear in the context? Flag anything that looks invented.
-2. Is there a conflict between authorities or chunks that the draft ignored?
-3. Is the context sufficient to answer the question at all, or is it thin?
+Check whether the claims are supported by the context, whether conflicts
+were ignored, and whether the context is sufficient.
 
-Keep your reasoning brief and focused. Then respond ONLY with JSON:
-{"approved": true/false, "reason": "short explanation", "retry_query": "", "retry_authority": "ALL"}
+Respond ONLY with JSON:
+{{"approved": true, "reason": "short explanation", "retry_query": "", "retry_authority": "ALL"}}
 """
 )
 
@@ -394,11 +401,11 @@ def finalize_unverified_node(state: RAGState) -> RAGState:
         "draft_answer": finding["draft"],
         "final_answer": finding["draft"],
         "verification": {
-            "approved": None,
-            "reason": "Verification skipped (fast mode). Human review required.",
-        },
-        "needs_review": True,
-        "answer_status": "REQUIRES_HUMAN_REVIEW",
+    "approved": None,
+    "reason": "Verification skipped (fast mode). Human review required.",
+},
+"needs_review": True,
+"answer_status": "REQUIRES_HUMAN_REVIEW",
         "corpus_version": state.get("corpus_version", settings.corpus_version),
     }
 
