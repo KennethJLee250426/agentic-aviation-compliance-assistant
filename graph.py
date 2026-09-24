@@ -17,10 +17,6 @@ Agents:
 - Verifier: checks the merged answer against all retrieved context, can
   send the graph back for another retrieval pass with a refined query.
                                                                  deepseek-r1:8b
-
-Sequential execution (not concurrent) is intentional: on an 8GB-VRAM laptop
-GPU, only one 8B model can be resident at a time anyway (see model config
-below), so there is no benefit to parallelizing the authority agents.
 """
 
 import json
@@ -36,28 +32,16 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from config import settings
+
 MAX_RETRIES = 2
-DB_DIR = "./regulatory_chroma_db"
-AUTHORITIES = ["EASA", "CAAS", "CAAC"]  # must match ingest.py's authority.upper()
+DB_DIR = settings.vector_db_path
+AUTHORITIES = ["EASA", "CAAS", "CAAC"]
 
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
-# Hardware note: an 8GB-VRAM GPU (e.g. RTX 4060 laptop) cannot hold two
-# resident 8B models at once (~4.7GB + ~4.9GB at Q4). Let Ollama fully
-# unload one model and load the other on each transition rather than
-# pinning either to CPU. To keep that swap clean (not a slow partial-VRAM
-# fit), set on the Ollama server itself, before `ollama serve`:
-#
-#   export OLLAMA_MAX_LOADED_MODELS=1
-#
 worker_llm = ChatOllama(model="llama3.1:8b", temperature=0.0, keep_alive="10m")
-# num_predict caps DeepSeek-R1's <think> + answer length. 600 was too tight
-# in practice — R1's reasoning trace alone was often exceeding it, cutting
-# the response off before it ever reached the JSON verdict, which made
-# extract_json() fail and every answer get incorrectly flagged as
-# "needs review". 2000 gives real headroom; tune down only if you confirm
-# via testing that your questions consistently finish well under that.
 verifier_llm = ChatOllama(
     model="deepseek-r1:8b", temperature=0.0, keep_alive="10m", num_predict=2000
 )
@@ -70,9 +54,6 @@ vectorstore: Optional[Chroma] = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Verifier schema
-# ---------------------------------------------------------------------------
 class VerificationResult(BaseModel):
     approved: bool
     reason: str = Field(..., min_length=1)
@@ -89,9 +70,6 @@ class VerificationResult(BaseModel):
         return normalized
 
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
 class AuthorityFinding(TypedDict):
     context: str
     draft: str
@@ -100,36 +78,30 @@ class AuthorityFinding(TypedDict):
 
 class RAGState(TypedDict):
     question: str
-    authority: str  # user-requested filter: "ALL" or one of AUTHORITIES
+    authority: str
     sub_queries: List[str]
-    all_relevant_authorities: List[str]  # fixed set decided at planning time
-    relevant_authorities: List[str]  # working set for this pass (narrows on retry)
+    all_relevant_authorities: List[str]
+    relevant_authorities: List[str]
     authority_findings: Dict[str, AuthorityFinding]
-    context_text: str  # combined, across relevant authorities
-    draft_answer: str  # aggregated answer
+    context_text: str
+    draft_answer: str
     verification: dict
     final_answer: str
     needs_review: bool
     retry_count: int
-    skip_verification: bool  # opt-in fast path, see run_query()
+    skip_verification: bool
+    answer_status: str
+    corpus_version: str
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def strip_think(text: str) -> str:
-    """Remove DeepSeek-R1's <think>...</think> reasoning block from output
-    shown to end users. Keep the raw text elsewhere (e.g. logs) if you want
-    an audit trail of the verifier's reasoning."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def extract_json(text: str) -> dict:
-    """Best-effort JSON extraction: models sometimes wrap JSON in prose or
-    markdown fences despite instructions. Falls back to a safe default.
-    Tries the <think>-stripped text first; if that finds nothing (e.g. the
-    <think> tag was left unclosed because generation was cut short), also
-    tries the raw text in case a JSON block appears after it anyway."""
     for candidate in (strip_think(text), text):
         cleaned = re.sub(r"```json|```", "", candidate).strip()
         match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
@@ -143,7 +115,6 @@ def extract_json(text: str) -> dict:
 
 
 def extract_verification_result(text: str) -> dict:
-    """Parse verifier output into a validated dict. Falls back to a safe default."""
     parsed = extract_json(text)
     if not parsed:
         return {}
@@ -169,7 +140,7 @@ def extract_verification_result(text: str) -> dict:
 def format_docs(docs: List[Document]) -> str:
     return "\n\n---\n\n".join(
         f"[{doc.metadata.get('authority', 'UNKNOWN')} - "
-        f"{os.path.basename(doc.metadata.get('source', 'Unknown'))}]\n{doc.page_content}"
+        f"{os.path.basename(doc.metadata.get('source', 'Unknown'))}]\\n{doc.page_content}"
         for doc in docs
     )
 
@@ -188,9 +159,6 @@ def dedupe_docs(docs: List[Document]) -> List[Document]:
 # ---------------------------------------------------------------------------
 # Planner
 # ---------------------------------------------------------------------------
-# Cheap heuristic to avoid an LLM call for the common case: a straightforward
-# single-lookup question. Only questions that look like they need comparing
-# or cross-checking multiple things get the (slower) LLM decomposition call.
 _MULTIHOP_MARKERS = (
     "compare", "comparison", "versus", " vs ", "difference between",
     "conflict", "contradict", "both", "satisfy", "does our", "cross-check",
@@ -210,7 +178,7 @@ requirements, or checking whether one satisfies another). Break it into
 2-4 focused sub-queries.
 
 Respond ONLY with JSON, no other text:
-{{"sub_queries": ["query 1", "query 2"]}}
+{"sub_queries": ["query 1", "query 2"]}
 
 Question: {question}
 """
@@ -218,10 +186,6 @@ Question: {question}
 
 
 def plan_node(state: RAGState) -> RAGState:
-    # Authority relevance is a fixed rule, not an LLM guess: for compliance
-    # content, silently having the planner exclude an authority it judged
-    # "irrelevant" is a real risk if it judges wrong. Default to checking
-    # all authorities unless the user explicitly filtered to one.
     if state["authority"] != "ALL" and state["authority"] in AUTHORITIES:
         relevant_authorities = [state["authority"]]
     else:
@@ -242,12 +206,10 @@ def plan_node(state: RAGState) -> RAGState:
         "all_relevant_authorities": relevant_authorities,
         "relevant_authorities": relevant_authorities,
         "retry_count": 0,
+        "answer_status": "PENDING",
     }
 
 
-# ---------------------------------------------------------------------------
-# Authority specialist agents
-# ---------------------------------------------------------------------------
 AUTHORITY_AGENT_PROMPT = ChatPromptTemplate.from_template(
     """You are the {authority} regulatory compliance specialist agent for an
 aviation MRO QEHS system. You only have access to {authority} source
@@ -314,9 +276,6 @@ def authority_agents_node(state: RAGState) -> RAGState:
     return {**state, "authority_findings": findings}
 
 
-# ---------------------------------------------------------------------------
-# Aggregator
-# ---------------------------------------------------------------------------
 AGGREGATE_PROMPT = ChatPromptTemplate.from_template(
     """You are the lead QEHS regulatory compliance specialist. Specialist
 agents for each relevant authority have reported their findings below.
@@ -327,13 +286,6 @@ Combine them into a single answer for a QA/EHS engineer:
 - Explicitly note where authorities AGREE, where they CONFLICT, and where
   one authority has no relevant material.
 - Do not invent anything beyond what the specialist findings state.
-- Each authority uses its own role names and terminology (e.g. "Compliance
-  Monitoring Manager", "Accountable Manager", "Quality Manager", "Part-IS
-  Manager"). These are DIFFERENT roles unless a specialist finding
-  explicitly states they are the same. Never write "(also referred to as
-  X)" or treat two named roles as interchangeable unless that equivalence
-  is stated in the findings below — keep each authority's terminology
-  separate rather than merging distinct roles into one umbrella term.
 
 Question: {question}
 
@@ -353,8 +305,6 @@ def aggregate_node(state: RAGState) -> RAGState:
         if authority in findings and findings[authority]["has_docs"]
     )
 
-    # Nothing to reconcile across authorities — skip the LLM call and use
-    # the single specialist's draft directly.
     if len(authorities) == 1 and authorities[0] in findings:
         return {
             **state,
@@ -369,9 +319,7 @@ def aggregate_node(state: RAGState) -> RAGState:
     )
 
     resp = worker_llm.invoke(
-        AGGREGATE_PROMPT.invoke(
-            {"question": state["question"], "findings": findings_block}
-        )
+        AGGREGATE_PROMPT.invoke({"question": state["question"], "findings": findings_block})
     )
 
     return {
@@ -381,9 +329,6 @@ def aggregate_node(state: RAGState) -> RAGState:
     }
 
 
-# ---------------------------------------------------------------------------
-# Verifier
-# ---------------------------------------------------------------------------
 VERIFY_PROMPT = ChatPromptTemplate.from_template(
     """You are a critical reviewer checking a draft regulatory compliance
 answer against its source context, before it goes to a QA/EHS engineer.
@@ -399,21 +344,11 @@ Authorities involved: {authorities}
 Check:
 1. Does every specific claim (clause numbers, requirements, dates) in the
 draft actually appear in the context? Flag anything that looks invented.
-2. Is there a conflict between authorities or chunks (e.g. an older vs
-newer revision) that the draft ignored or misrepresented?
+2. Is there a conflict between authorities or chunks that the draft ignored?
 3. Is the context sufficient to answer the question at all, or is it thin?
-4. Does the draft claim two differently-named roles, terms, or documents
-are "the same as" or "also referred to as" each other? If so, does the
-context actually state that equivalence anywhere, or did the draft
-assume it? Different authorities using similar-sounding role names
-(e.g. Compliance Monitoring Manager vs Accountable Manager vs Part-IS
-Manager) are NOT automatically the same role — treat an unstated
-equivalence as an invented claim, same as check 1.
 
-Keep your reasoning brief and focused — a few sentences per check above is
-enough, you do not need to restate the full context or draft back to
-yourself. Then respond ONLY with JSON, no other text:
-{{"approved": true/false, "reason": "short explanation", "retry_query": "a refined search query if approved is false, else empty string", "retry_authority": "which single authority from {authorities} to retry, or ALL if not sure"}}
+Keep your reasoning brief and focused. Then respond ONLY with JSON:
+{"approved": true/false, "reason": "short explanation", "retry_query": "", "retry_authority": "ALL"}
 """
 )
 
@@ -439,9 +374,6 @@ def verify_node(state: RAGState) -> RAGState:
 
 
 def route_after_authority_agents(state: RAGState) -> str:
-    # Opt-in fast path (see run_query's skip_verification param): only
-    # takes effect when it's genuinely low-risk — single authority, that
-    # authority actually had matching docs, not a multi-hop question.
     single_authority = state["all_relevant_authorities"]
     is_low_risk = (
         len(single_authority) == 1
@@ -466,6 +398,8 @@ def finalize_unverified_node(state: RAGState) -> RAGState:
             "reason": "Verification skipped (fast mode). Human review required.",
         },
         "needs_review": True,
+        "answer_status": "REQUIRES_HUMAN_REVIEW",
+        "corpus_version": state.get("corpus_version", settings.corpus_version),
     }
 
 
@@ -483,31 +417,14 @@ def prep_retry_node(state: RAGState) -> RAGState:
     findings = state["authority_findings"]
 
     if retry_authority in state["all_relevant_authorities"]:
-        # The verifier confidently named one authority — only it gets
-        # re-processed; the others' cached findings are kept as-is.
         narrowed = [retry_authority]
     else:
-        # Ambiguous verifier response ("ALL" or unparseable). Do NOT blindly
-        # re-run every authority with the modified query — that would
-        # silently overwrite authorities that already found correct,
-        # relevant material with whatever a different query happens to
-        # retrieve, which can make a good finding worse. Instead, only
-        # re-run authorities that came back empty last time (the ones
-        # actually likely responsible for "context is thin"). If every
-        # authority already found something, fall back to re-running all
-        # of them, since we genuinely don't know which one is at fault.
         empty_authorities = [
-            a
-            for a in state["all_relevant_authorities"]
+            a for a in state["all_relevant_authorities"]
             if not findings.get(a, {}).get("has_docs", False)
         ]
         narrowed = empty_authorities or list(state["all_relevant_authorities"])
 
-    # Search with BOTH the verifier's refined query and the original
-    # question — not just the refined one. The refined query isn't
-    # guaranteed to retrieve better than the original phrasing did; adding
-    # it as an extra query (not a replacement) increases recall instead of
-    # gambling away a previously-good match.
     retry_sub_queries = [state["question"]]
     if retry_query != state["question"]:
         retry_sub_queries.append(retry_query)
@@ -527,15 +444,26 @@ def finalize_node(state: RAGState) -> RAGState:
         reason = state["verification"].get("reason", "unspecified")
         answer = (
             "⚠️ **Needs human review** — automated verification could not "
-            f"confirm this answer against source documents ({reason}).\n\n"
+            f"confirm this answer against source documents ({reason}).\\n\\n"
             + answer
         )
-    return {**state, "final_answer": answer, "needs_review": not approved}
+        return {
+            **state,
+            "final_answer": answer,
+            "needs_review": True,
+            "answer_status": "REQUIRES_HUMAN_REVIEW",
+            "corpus_version": state.get("corpus_version", settings.corpus_version),
+        }
+
+    return {
+        **state,
+        "final_answer": answer,
+        "needs_review": False,
+        "answer_status": "VERIFIED",
+        "corpus_version": state.get("corpus_version", settings.corpus_version),
+    }
 
 
-# ---------------------------------------------------------------------------
-# Graph assembly
-# ---------------------------------------------------------------------------
 def build_graph():
     graph = StateGraph(RAGState)
     graph.add_node("plan", plan_node)
@@ -584,5 +512,7 @@ def run_query(
         "needs_review": False,
         "retry_count": 0,
         "skip_verification": skip_verification,
+        "answer_status": "PENDING",
+        "corpus_version": settings.corpus_version,
     }
     return compiled_graph.invoke(initial_state)
