@@ -51,11 +51,14 @@ AUTHORITIES = ["EASA", "CAAS", "CAAC"]  # must match ingest.py's authority.upper
 #   export OLLAMA_MAX_LOADED_MODELS=1
 #
 worker_llm = ChatOllama(model="llama3.1:8b", temperature=0.0, keep_alive="10m")
-# num_predict caps DeepSeek-R1's <think> + answer length so a runaway
-# reasoning trace can't blow out latency unbounded. Tune down further if
-# 600 tokens still runs long on your hardware.
+# num_predict caps DeepSeek-R1's <think> + answer length. 600 was too tight
+# in practice — R1's reasoning trace alone was often exceeding it, cutting
+# the response off before it ever reached the JSON verdict, which made
+# extract_json() fail and every answer get incorrectly flagged as
+# "needs review". 2000 gives real headroom; tune down only if you confirm
+# via testing that your questions consistently finish well under that.
 verifier_llm = ChatOllama(
-    model="deepseek-r1:8b", temperature=0.0, keep_alive="10m", num_predict=600
+    model="deepseek-r1:8b", temperature=0.0, keep_alive="10m", num_predict=2000
 )
 
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -103,16 +106,20 @@ def strip_think(text: str) -> str:
 
 def extract_json(text: str) -> dict:
     """Best-effort JSON extraction: models sometimes wrap JSON in prose or
-    markdown fences despite instructions. Falls back to a safe default."""
-    cleaned = strip_think(text)
-    cleaned = re.sub(r"```json|```", "", cleaned).strip()
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    if not match:
-        return {}
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return {}
+    markdown fences despite instructions. Falls back to a safe default.
+    Tries the <think>-stripped text first; if that finds nothing (e.g. the
+    <think> tag was left unclosed because generation was cut short), also
+    tries the raw text in case a JSON block appears after it anyway."""
+    for candidate in (strip_think(text), text):
+        cleaned = re.sub(r"```json|```", "", candidate).strip()
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            continue
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+    return {}
 
 
 def format_docs(docs: List[Document]) -> str:
@@ -276,6 +283,13 @@ Combine them into a single answer for a QA/EHS engineer:
 - Explicitly note where authorities AGREE, where they CONFLICT, and where
   one authority has no relevant material.
 - Do not invent anything beyond what the specialist findings state.
+- Each authority uses its own role names and terminology (e.g. "Compliance
+  Monitoring Manager", "Accountable Manager", "Quality Manager", "Part-IS
+  Manager"). These are DIFFERENT roles unless a specialist finding
+  explicitly states they are the same. Never write "(also referred to as
+  X)" or treat two named roles as interchangeable unless that equivalence
+  is stated in the findings below — keep each authority's terminology
+  separate rather than merging distinct roles into one umbrella term.
 
 Question: {question}
 
@@ -344,8 +358,17 @@ Check:
 2. Is there a conflict between authorities or chunks (e.g. an older vs
    newer revision) that the draft ignored or misrepresented?
 3. Is the context sufficient to answer the question at all, or is it thin?
+4. Does the draft claim two differently-named roles, terms, or documents
+   are "the same as" or "also referred to as" each other? If so, does the
+   context actually state that equivalence anywhere, or did the draft
+   assume it? Different authorities using similar-sounding role names
+   (e.g. Compliance Monitoring Manager vs Accountable Manager vs Part-IS
+   Manager) are NOT automatically the same role — treat an unstated
+   equivalence as an invented claim, same as check 1.
 
-Respond ONLY with JSON, no other text:
+Keep your reasoning brief and focused — a few sentences per check above is
+enough, you do not need to restate the full context or draft back to
+yourself. Then respond ONLY with JSON, no other text:
 {{"approved": true/false, "reason": "short explanation", "retry_query": "a refined search query if approved is false, else empty string", "retry_authority": "which single authority from {authorities} most needs re-checking, or ALL if unclear, or empty string if approved"}}
 """
 )
@@ -410,17 +433,41 @@ def route_after_verify(state: RAGState) -> str:
 def prep_retry_node(state: RAGState) -> RAGState:
     retry_query = state["verification"].get("retry_query") or state["question"]
     retry_authority = state["verification"].get("retry_authority", "ALL")
+    findings = state["authority_findings"]
 
     if retry_authority in state["all_relevant_authorities"]:
-        # Only the flagged authority gets re-processed; the others' cached
-        # findings in authority_findings are kept as-is for re-aggregation.
+        # The verifier confidently named one authority — only it gets
+        # re-processed; the others' cached findings are kept as-is.
         narrowed = [retry_authority]
     else:
-        narrowed = list(state["all_relevant_authorities"])
+        # Ambiguous verifier response ("ALL" or unparseable). Do NOT blindly
+        # re-run every authority with the modified query — that would
+        # silently overwrite authorities that already found correct,
+        # relevant material with whatever a different query happens to
+        # retrieve, which can make a good finding worse. Instead, only
+        # re-run authorities that came back empty last time (the ones
+        # actually likely responsible for "context is thin"). If every
+        # authority already found something, fall back to re-running all
+        # of them, since we genuinely don't know which one is at fault.
+        empty_authorities = [
+            a
+            for a in state["all_relevant_authorities"]
+            if not findings.get(a, {}).get("has_docs", False)
+        ]
+        narrowed = empty_authorities or list(state["all_relevant_authorities"])
+
+    # Search with BOTH the verifier's refined query and the original
+    # question — not just the refined one. The refined query isn't
+    # guaranteed to retrieve better than the original phrasing did; adding
+    # it as an extra query (not a replacement) increases recall instead of
+    # gambling away a previously-good match.
+    retry_sub_queries = [state["question"]]
+    if retry_query != state["question"]:
+        retry_sub_queries.append(retry_query)
 
     return {
         **state,
-        "sub_queries": [retry_query],
+        "sub_queries": retry_sub_queries,
         "relevant_authorities": narrowed,
         "retry_count": state["retry_count"] + 1,
     }
