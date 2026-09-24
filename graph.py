@@ -13,10 +13,10 @@ Agents:
   states plainly that its corpus has no relevant material.      llama3.1:8b
 - Aggregator: merges the per-authority findings into one answer, explicitly
   calling out where authorities agree, conflict, or where one is silent.
-                                                                  llama3.1:8b
+                                                                   llama3.1:8b
 - Verifier: checks the merged answer against all retrieved context, can
   send the graph back for another retrieval pass with a refined query.
-                                                                deepseek-r1:8b
+                                                                 deepseek-r1:8b
 
 Sequential execution (not concurrent) is intentional: on an 8GB-VRAM laptop
 GPU, only one 8B model can be resident at a time anyway (see model config
@@ -34,6 +34,7 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 MAX_RETRIES = 2
 DB_DIR = "./regulatory_chroma_db"
@@ -70,6 +71,25 @@ vectorstore: Optional[Chroma] = (
 
 
 # ---------------------------------------------------------------------------
+# Verifier schema
+# ---------------------------------------------------------------------------
+class VerificationResult(BaseModel):
+    approved: bool
+    reason: str = Field(..., min_length=1)
+    retry_query: str = ""
+    retry_authority: str = "ALL"
+
+    @field_validator("retry_authority")
+    @classmethod
+    def validate_retry_authority(cls, value: str) -> str:
+        normalized = (value or "ALL").upper()
+        allowed = {"ALL", "EASA", "CAAS", "CAAC"}
+        if normalized not in allowed:
+            return "ALL"
+        return normalized
+
+
+# ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
 class AuthorityFinding(TypedDict):
@@ -97,46 +117,56 @@ class RAGState(TypedDict):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-import json
-import re
-from typing import List
-from pydantic import BaseModel, ValidationError
-
 def strip_think(text: str) -> str:
     """Remove DeepSeek-R1's <think>...</think> reasoning block from output
     shown to end users. Keep the raw text elsewhere (e.g. logs) if you want
     an audit trail of the verifier's reasoning."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-class VerificationResult(BaseModel):
-    approved: bool
-    reason: str
-    retry_query: str = ""
-    retry_authority: str = "ALL"
 
-def extract_verification_result(text: str) -> VerificationResult:
-    """Best-effort JSON extraction and validation: models sometimes wrap JSON in prose 
-    or markdown fences. Falls back to a safe default VerificationResult if extraction 
-    or schema validation fails."""
+def extract_json(text: str) -> dict:
+    """Best-effort JSON extraction: models sometimes wrap JSON in prose or
+    markdown fences despite instructions. Falls back to a safe default.
+    Tries the <think>-stripped text first; if that finds nothing (e.g. the
+    <think> tag was left unclosed because generation was cut short), also
+    tries the raw text in case a JSON block appears after it anyway."""
     for candidate in (strip_think(text), text):
         cleaned = re.sub(r"```json|```", "", candidate).strip()
         match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
         if not match:
             continue
         try:
-            data = json.loads(match.group(0))
-            # Pydantic v2 validation
-            return VerificationResult.model_validate(data)
-        except (json.JSONDecodeError, ValidationError):
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
             continue
-            
-    # Safe fallback default matching your model schema
-    return VerificationResult(
-        approved=False,
-        reason="Could not extract valid verification JSON from response"
-    )
+    return {}
 
-def format_docs(docs: List) -> str:
+
+def extract_verification_result(text: str) -> dict:
+    """Parse verifier output into a validated dict. Falls back to a safe default."""
+    parsed = extract_json(text)
+    if not parsed:
+        return {}
+
+    try:
+        result = VerificationResult.model_validate(parsed)
+        return result.model_dump()
+    except ValidationError:
+        reason = str(parsed.get("reason") or "Could not parse verifier output.")
+        retry_query = str(parsed.get("retry_query") or "")
+        retry_authority = str(parsed.get("retry_authority") or "ALL").upper()
+        if retry_authority not in {"ALL", "EASA", "CAAS", "CAAC"}:
+            retry_authority = "ALL"
+
+        return {
+            "approved": bool(parsed.get("approved", False)),
+            "reason": reason,
+            "retry_query": retry_query,
+            "retry_authority": retry_authority,
+        }
+
+
+def format_docs(docs: List[Document]) -> str:
     return "\n\n---\n\n".join(
         f"[{doc.metadata.get('authority', 'UNKNOWN')} - "
         f"{os.path.basename(doc.metadata.get('source', 'Unknown'))}]\n{doc.page_content}"
@@ -368,22 +398,22 @@ Authorities involved: {authorities}
 
 Check:
 1. Does every specific claim (clause numbers, requirements, dates) in the
-   draft actually appear in the context? Flag anything that looks invented.
+draft actually appear in the context? Flag anything that looks invented.
 2. Is there a conflict between authorities or chunks (e.g. an older vs
-   newer revision) that the draft ignored or misrepresented?
+newer revision) that the draft ignored or misrepresented?
 3. Is the context sufficient to answer the question at all, or is it thin?
 4. Does the draft claim two differently-named roles, terms, or documents
-   are "the same as" or "also referred to as" each other? If so, does the
-   context actually state that equivalence anywhere, or did the draft
-   assume it? Different authorities using similar-sounding role names
-   (e.g. Compliance Monitoring Manager vs Accountable Manager vs Part-IS
-   Manager) are NOT automatically the same role — treat an unstated
-   equivalence as an invented claim, same as check 1.
+are "the same as" or "also referred to as" each other? If so, does the
+context actually state that equivalence anywhere, or did the draft
+assume it? Different authorities using similar-sounding role names
+(e.g. Compliance Monitoring Manager vs Accountable Manager vs Part-IS
+Manager) are NOT automatically the same role — treat an unstated
+equivalence as an invented claim, same as check 1.
 
 Keep your reasoning brief and focused — a few sentences per check above is
 enough, you do not need to restate the full context or draft back to
 yourself. Then respond ONLY with JSON, no other text:
-{{"approved": true/false, "reason": "short explanation", "retry_query": "a refined search query if approved is false, else empty string", "retry_authority": "which single authority from {authorities} most needs re-checking, or ALL if unclear, or empty string if approved"}}
+{{"approved": true/false, "reason": "short explanation", "retry_query": "a refined search query if approved is false, else empty string", "retry_authority": "which single authority from {authorities} to retry, or ALL if not sure"}}
 """
 )
 
@@ -398,7 +428,7 @@ def verify_node(state: RAGState) -> RAGState:
             }
         )
     )
-    parsed = extract_json(resp.content)
+    parsed = extract_verification_result(resp.content)
     verification = {
         "approved": parsed.get("approved", False),
         "reason": parsed.get("reason", "Could not parse verifier output."),
@@ -409,7 +439,9 @@ def verify_node(state: RAGState) -> RAGState:
 
 
 def route_after_authority_agents(state: RAGState) -> str:
-    # Opt-in fast path...
+    # Opt-in fast path (see run_query's skip_verification param): only
+    # takes effect when it's genuinely low-risk — single authority, that
+    # authority actually had matching docs, not a multi-hop question.
     single_authority = state["all_relevant_authorities"]
     is_low_risk = (
         len(single_authority) == 1
@@ -431,7 +463,7 @@ def finalize_unverified_node(state: RAGState) -> RAGState:
         "final_answer": finding["draft"],
         "verification": {
             "approved": None,
-            "reason": "Verification skipped (fast mode). Human review required."
+            "reason": "Verification skipped (fast mode). Human review required.",
         },
         "needs_review": True,
     }
