@@ -2,21 +2,20 @@ import logging
 import os
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
+from auth import optional_auth
+from config import settings
 from graph import run_query, vectorstore
 
 app = FastAPI(title="Aviation Regulatory Agentic RAG POC")
 
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8000").split(",")
-allowed_origins = [origin.strip() for origin in allowed_origins if origin.strip()]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
@@ -26,7 +25,7 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=4000)
     authority: str = "ALL"
-    skip_verification: bool = False  # opt-in fast path; see graph.py
+    skip_verification: bool = False
 
     @field_validator("authority")
     @classmethod
@@ -46,13 +45,26 @@ async def read_index():
     return "<h3>Error: templates/index.html not found!</h3>"
 
 
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "vectorstore_loaded": vectorstore is not None}
+@app.get("/health/live")
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    return {
+        "status": "ok",
+        "vectorstore_loaded": vectorstore is not None,
+        "auth_required": settings.auth_required,
+        "corpus_version": settings.corpus_version,
+    }
 
 
 @app.post("/api/query")
-async def query_rag(req: QueryRequest):
+async def query_rag(req: QueryRequest, auth=Depends(optional_auth)):
+    if settings.auth_required and auth is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     if vectorstore is None:
         raise HTTPException(
             status_code=400,
@@ -63,12 +75,14 @@ async def query_rag(req: QueryRequest):
         result = run_query(req.question, req.authority, req.skip_verification)
         return {
             "answer": result.get("final_answer", ""),
+            "answer_status": result.get("answer_status", "UNKNOWN"),
             "sources": result.get("context_text", ""),
             "needs_review": bool(result.get("needs_review", False)),
             "verification": result.get("verification", {}),
             "retry_count": result.get("retry_count", 0),
             "sub_queries": result.get("sub_queries", []),
             "relevant_authorities": result.get("all_relevant_authorities", []),
+            "corpus_version": result.get("corpus_version", settings.corpus_version),
             "authority_findings": {
                 authority: finding.get("draft", "")
                 for authority, finding in result.get("authority_findings", {}).items()
