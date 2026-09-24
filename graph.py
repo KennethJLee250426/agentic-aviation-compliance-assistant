@@ -1,24 +1,3 @@
-"""
-Agentic RAG pipeline for aviation regulatory compliance.
-
-Flow:
-    plan -> authority_agents (fan out over EASA/CAAS/CAAC as needed)
-         -> aggregate -> verify -> (retry authority_agents | finalize)
-
-Agents:
-- Planner: decides sub-queries and which authorities (EASA/CAAS/CAAC) are
-  relevant to the question.                                    llama3.1:8b
-- Authority specialist agents: one per relevant authority. Each retrieves
-  ONLY from that authority's documents and drafts a scoped finding, or
-  states plainly that its corpus has no relevant material.      llama3.1:8b
-- Aggregator: merges the per-authority findings into one answer, explicitly
-  calling out where authorities agree, conflict, or where one is silent.
-                                                                   llama3.1:8b
-- Verifier: checks the merged answer against all retrieved context, can
-  send the graph back for another retrieval pass with a refined query.
-                                                                 deepseek-r1:8b
-"""
-
 import json
 import os
 import re
@@ -32,22 +11,24 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from langgraph.graph import END, StateGraph
-
 from config import settings
 
 MAX_RETRIES = 2
 DB_DIR = settings.vector_db_path
 AUTHORITIES = ["EASA", "CAAS", "CAAC"]
 
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
 worker_llm = ChatOllama(
     model=settings.worker_model,
     base_url=settings.ollama_host,
     temperature=0.0,
     keep_alive="10m",
+)
+
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vectorstore: Optional[Chroma] = (
+    Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+    if os.path.exists(DB_DIR)
+    else None
 )
 
 verifier_llm = ChatOllama(
@@ -56,13 +37,6 @@ verifier_llm = ChatOllama(
     temperature=0.0,
     keep_alive="10m",
     num_predict=2000,
-)
-
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-vectorstore: Optional[Chroma] = (
-    Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-    if os.path.exists(DB_DIR)
-    else None
 )
 
 
@@ -106,9 +80,6 @@ class RAGState(TypedDict):
     corpus_version: str
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def strip_think(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
@@ -116,7 +87,7 @@ def strip_think(text: str) -> str:
 def extract_json(text: str) -> dict:
     for candidate in (strip_think(text), text):
         cleaned = re.sub(r"```json|```", "", candidate).strip()
-        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        match = re.search(r"\{.*?\}", cleaned, flags=re.DOTALL)
         if not match:
             continue
         try:
@@ -128,33 +99,30 @@ def extract_json(text: str) -> dict:
 
 def extract_verification_result(text: str) -> dict:
     parsed = extract_json(text)
-
     if not parsed:
+        return {}
+
+    try:
+        result = VerificationResult.model_validate(parsed)
+        return result.model_dump()
+    except ValidationError:
+        reason = str(parsed.get("reason") or "Could not parse verifier output.")
+        retry_query = str(parsed.get("retry_query") or "")
+        retry_authority = str(parsed.get("retry_authority") or "ALL").upper()
+        if retry_authority not in {"ALL", "EASA", "CAAS", "CAAC"}:
+            retry_authority = "ALL"
+
         return {
-            "approved": False,
-            "reason": "Could not parse verifier output.",
-            "retry_query": "",
-            "retry_authority": "ALL",
+            "approved": bool(parsed.get("approved", False)),
+            "reason": reason,
+            "retry_query": retry_query,
+            "retry_authority": retry_authority,
         }
-
-    retry_authority = str(
-        parsed.get("retry_authority") or "ALL"
-    ).upper()
-
-    if retry_authority not in {"ALL", "EASA", "CAAS", "CAAC"}:
-        retry_authority = "ALL"
-
-    return {
-        "approved": bool(parsed.get("approved", False)),
-        "reason": str(
-            parsed.get("reason") or "Could not parse verifier output."
-        ),
-        "retry_query": str(parsed.get("retry_query") or ""),
-        "retry_authority": retry_authority,
-    }
 
 
 def format_docs(docs: List[Document]) -> str:
+    if not docs:
+        return ""
     return "\n\n---\n\n".join(
         f"[{doc.metadata.get('authority', 'UNKNOWN')} - "
         f"{os.path.basename(doc.metadata.get('source', 'Unknown'))}]\n"
@@ -174,9 +142,6 @@ def dedupe_docs(docs: List[Document]) -> List[Document]:
     return unique
 
 
-# ---------------------------------------------------------------------------
-# Planner
-# ---------------------------------------------------------------------------
 _MULTIHOP_MARKERS = (
     "compare", "comparison", "versus", " vs ", "difference between",
     "conflict", "contradict", "both", "satisfy", "does our", "cross-check",
@@ -212,19 +177,18 @@ def plan_node(state: RAGState) -> RAGState:
         resp = worker_llm.invoke(
             DECOMPOSE_PROMPT.invoke({"question": state["question"]})
         )
-        parsed = extract_verification_result(resp.content)
+        parsed = extract_json(resp.content)
         sub_queries = parsed.get("sub_queries") or [state["question"]]
     else:
         sub_queries = [state["question"]]
 
     return {
         **state,
-        "sub_queries": sub_queries,
+        "sub_queries": sub_queries[:4],
         "all_relevant_authorities": relevant_authorities,
         "relevant_authorities": relevant_authorities,
         "retry_count": 0,
         "answer_status": "PENDING",
-        "corpus_version": state.get("corpus_version", settings.corpus_version),
     }
 
 
@@ -317,6 +281,13 @@ def aggregate_node(state: RAGState) -> RAGState:
     findings = state["authority_findings"]
     authorities = state["all_relevant_authorities"]
 
+    if not authorities or not any(authority in findings for authority in authorities):
+        return {
+            **state,
+            "context_text": "",
+            "draft_answer": "No relevant material found in the current corpus.",
+        }
+
     combined_context = "\n\n===\n\n".join(
         f"### {authority} source excerpts\n{findings[authority]['context']}"
         for authority in authorities
@@ -363,8 +334,10 @@ Authorities involved:
 Check whether the claims are supported by the context, whether conflicts
 were ignored, and whether the context is sufficient.
 
-Then respond ONLY with JSON, no other text:
+Respond ONLY with JSON:
 {{"approved": true, "reason": "short explanation", "retry_query": "", "retry_authority": "ALL"}}
+"""
+)
 
 
 def verify_node(state: RAGState) -> RAGState:
@@ -388,32 +361,48 @@ def verify_node(state: RAGState) -> RAGState:
 
 
 def route_after_authority_agents(state: RAGState) -> str:
-    single_authority = state["all_relevant_authorities"]
+    authorities = state.get("all_relevant_authorities") or []
     is_low_risk = (
-        len(single_authority) == 1
-        and state["authority_findings"].get(single_authority[0], {}).get("has_docs")
+        len(authorities) == 1
+        and state["authority_findings"].get(authorities[0], {}).get("has_docs")
         and not _looks_multihop(state["question"])
     )
-    if state["skip_verification"] and is_low_risk:
+    if state.get("skip_verification") and is_low_risk:
         return "finalize_unverified"
     return "aggregate"
 
 
 def finalize_unverified_node(state: RAGState) -> RAGState:
-    authority = state["all_relevant_authorities"][0]
-    finding = state["authority_findings"][authority]
+    authorities = state.get("all_relevant_authorities") or []
+    if not authorities:
+        return {
+            **state,
+            "final_answer": "No relevant authority was selected for this question.",
+            "verification": {
+                "approved": None,
+                "reason": "Verification skipped (fast mode). Human review required.",
+            },
+            "needs_review": True,
+            "answer_status": "REQUIRES_HUMAN_REVIEW",
+            "corpus_version": state.get("corpus_version", settings.corpus_version),
+        }
+
+    authority = authorities[0]
+    finding = state["authority_findings"].get(authority, {})
+    final_draft = finding.get("draft", "No relevant material found in the current corpus.")
     return {
         **state,
-        "context_text": finding["context"],
-        "draft_answer": finding["draft"],
-        "final_answer": finding["draft"],
- "verification": {
-    "approved": None,
-    "reason": "Verification skipped (fast mode). Human review required.",
-},
-"needs_review": True,
-"answer_status": "REQUIRES_HUMAN_REVIEW",
-"corpus_version": state.get("corpus_version", settings.corpus_version),
+        "context_text": finding.get("context", ""),
+        "draft_answer": final_draft,
+        "final_answer": final_draft,
+        "verification": {
+            "approved": None,
+            "reason": "Verification skipped (fast mode). Human review required.",
+        },
+        "needs_review": True,
+        "answer_status": "REQUIRES_HUMAN_REVIEW",
+        "corpus_version": state.get("corpus_version", settings.corpus_version),
+    }
 
 
 def route_after_verify(state: RAGState) -> str:
@@ -444,7 +433,7 @@ def prep_retry_node(state: RAGState) -> RAGState:
 
     return {
         **state,
-        "sub_queries": retry_sub_queries,
+        "sub_queries": retry_sub_queries[:4],
         "relevant_authorities": narrowed,
         "retry_count": state["retry_count"] + 1,
     }
@@ -453,7 +442,6 @@ def prep_retry_node(state: RAGState) -> RAGState:
 def finalize_node(state: RAGState) -> RAGState:
     approved = state["verification"].get("approved", False)
     answer = state["draft_answer"]
-
     if not approved:
         reason = state["verification"].get("reason", "unspecified")
         answer = (
@@ -466,6 +454,7 @@ def finalize_node(state: RAGState) -> RAGState:
             "final_answer": answer,
             "needs_review": True,
             "answer_status": "REQUIRES_HUMAN_REVIEW",
+            "corpus_version": state.get("corpus_version", settings.corpus_version),
         }
 
     return {
@@ -473,6 +462,7 @@ def finalize_node(state: RAGState) -> RAGState:
         "final_answer": answer,
         "needs_review": False,
         "answer_status": "VERIFIED",
+        "corpus_version": state.get("corpus_version", settings.corpus_version),
     }
 
 

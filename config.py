@@ -7,6 +7,7 @@ from pathlib import Path
 class Settings:
     allowed_origins: list[str]
     auth_required: bool
+    auth_token: str
     ollama_host: str
     vector_db_path: str
     log_level: str
@@ -44,6 +45,7 @@ def resolve_vector_db_path() -> str:
 settings = Settings(
     allowed_origins=_split_csv(os.getenv("ALLOWED_ORIGINS"), "http://localhost:8000"),
     auth_required=_bool_env("AUTH_REQUIRED", False),
+    auth_token=os.getenv("AUTH_TOKEN", "change-me"),
     ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
     vector_db_path=resolve_vector_db_path(),
     log_level=os.getenv("LOG_LEVEL", "INFO"),

@@ -1,10 +1,10 @@
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 
-from config import settings
-
 from bs4 import BeautifulSoup
+from docx import Document as DocxDocument
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -53,10 +53,6 @@ def build_vector_db():
                     loader = PyPDFLoader(file_path)
                     pdf_docs = loader.load()
                     for doc in pdf_docs:
-                        doc.metadata["corpus_version"] = settings.corpus_version
-doc.metadata["ingested_at"] = datetime.now(
-    timezone.utc
-).isoformat()
                         doc.metadata = dict(doc.metadata or {})
                         doc.metadata["source"] = file_path
                         doc.metadata["authority"] = authority.upper()
@@ -80,6 +76,30 @@ doc.metadata["ingested_at"] = datetime.now(
                     docs.append(
                         Document(
                             page_content=xml_text,
+                            metadata={
+                                "source": file_path,
+                                "authority": authority.upper(),
+                                "source_hash": source_hash,
+                                "ingested_at": manifest["generated_at"],
+                                "corpus_version": settings.corpus_version,
+                            },
+                        )
+                    )
+                    manifest["documents"].append(
+                        {
+                            "source": file_path,
+                            "authority": authority.upper(),
+                            "sha256": source_hash,
+                            "status": "ok",
+                        }
+                    )
+                elif file_lower.endswith(".docx"):
+                    docx_file = DocxDocument(file_path)
+                    paragraphs = [p.text for p in docx_file.paragraphs if p.text.strip()]
+                    text = "\n".join(paragraphs)
+                    docs.append(
+                        Document(
+                            page_content=text,
                             metadata={
                                 "source": file_path,
                                 "authority": authority.upper(),
@@ -123,12 +143,10 @@ doc.metadata["ingested_at"] = datetime.now(
 
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     batch_size = 2000
-    persist_dir = persist_dir = os.path.join(
-    "indexes",
-    settings.corpus_version,
-)
+    persist_dir = os.path.join("indexes", settings.corpus_version)
 
-os.makedirs(persist_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(persist_dir) or ".", exist_ok=True)
+
     vectorstore = None
     print(f"Embedding and saving chunks in batches of {batch_size}...")
     for i in range(0, len(chunks), batch_size):
