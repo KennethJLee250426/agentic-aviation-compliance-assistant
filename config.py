@@ -11,6 +11,8 @@ class Settings:
     vector_db_path: str
     log_level: str
     corpus_version: str
+    worker_model: str
+    verifier_model: str
 
 
 def _split_csv(value: str | None, default: str) -> list[str]:
@@ -26,23 +28,32 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 def resolve_vector_db_path() -> str:
-    configured = os.getenv("VECTOR_DB_PATH")
+    configured = os.getenv("VECTOR_DB_PATH", "").strip()
+
+    # An explicit non-empty path takes priority.
     if configured:
         return configured
 
     current_file = Path("indexes/current.txt")
     if current_file.exists():
         corpus_version = current_file.read_text(encoding="utf-8").strip()
-        return str(Path("indexes") / corpus_version)
+        if corpus_version:
+            return str(Path("indexes") / corpus_version)
 
+    # Legacy fallback for an existing old index.
     return "./regulatory_chroma_db"
 
 
 settings = Settings(
-    allowed_origins=_split_csv(os.getenv("ALLOWED_ORIGINS"), "http://localhost:8000"),
+    allowed_origins=_split_csv(
+        os.getenv("ALLOWED_ORIGINS"),
+        "http://localhost:8000",
+    ),
     auth_required=_bool_env("AUTH_REQUIRED", False),
     ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
     vector_db_path=resolve_vector_db_path(),
     log_level=os.getenv("LOG_LEVEL", "INFO"),
     corpus_version=os.getenv("CORPUS_VERSION", "2026-09-24"),
+    worker_model=os.getenv("WORKER_MODEL", "llama3.1:8b"),
+    verifier_model=os.getenv("VERIFIER_MODEL", "deepseek-r1:8b"),
 )
