@@ -97,32 +97,46 @@ class RAGState(TypedDict):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+import json
+import re
+from typing import List
+from pydantic import BaseModel, ValidationError
+
 def strip_think(text: str) -> str:
     """Remove DeepSeek-R1's <think>...</think> reasoning block from output
     shown to end users. Keep the raw text elsewhere (e.g. logs) if you want
     an audit trail of the verifier's reasoning."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
+class VerificationResult(BaseModel):
+    approved: bool
+    reason: str
+    retry_query: str = ""
+    retry_authority: str = "ALL"
 
-def extract_json(text: str) -> dict:
-    """Best-effort JSON extraction: models sometimes wrap JSON in prose or
-    markdown fences despite instructions. Falls back to a safe default.
-    Tries the <think>-stripped text first; if that finds nothing (e.g. the
-    <think> tag was left unclosed because generation was cut short), also
-    tries the raw text in case a JSON block appears after it anyway."""
+def extract_verification_result(text: str) -> VerificationResult:
+    """Best-effort JSON extraction and validation: models sometimes wrap JSON in prose 
+    or markdown fences. Falls back to a safe default VerificationResult if extraction 
+    or schema validation fails."""
     for candidate in (strip_think(text), text):
         cleaned = re.sub(r"```json|```", "", candidate).strip()
         match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
         if not match:
             continue
         try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
+            data = json.loads(match.group(0))
+            # Pydantic v2 validation
+            return VerificationResult.model_validate(data)
+        except (json.JSONDecodeError, ValidationError):
             continue
-    return {}
+            
+    # Safe fallback default matching your model schema
+    return VerificationResult(
+        approved=False,
+        reason="Could not extract valid verification JSON from response"
+    )
 
-
-def format_docs(docs: List[Document]) -> str:
+def format_docs(docs: List) -> str:
     return "\n\n---\n\n".join(
         f"[{doc.metadata.get('authority', 'UNKNOWN')} - "
         f"{os.path.basename(doc.metadata.get('source', 'Unknown'))}]\n{doc.page_content}"
