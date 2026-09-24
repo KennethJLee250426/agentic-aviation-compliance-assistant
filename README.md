@@ -22,7 +22,7 @@ the steps in order.
 | A computer with a decent GPU (8GB+ VRAM recommended) | The AI models run locally and need graphics memory | Works on CPU only too, but much slower |
 | [Python 3.10 or newer](https://www.python.org/downloads/) | Runs the application code | Check with `python --version` |
 | [Ollama](https://ollama.com/download) | Runs the AI models locally | Free, install like any normal app |
-| Your regulatory documents (PDF or XML) | The content the system answers questions from | See folder structure below |
+| Your regulatory documents (PDF, XML, Docx, etc) | The content the system answers questions from | See folder structure below |
 
 ---
 
