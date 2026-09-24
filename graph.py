@@ -17,6 +17,52 @@ MAX_RETRIES = 2
 DB_DIR = settings.vector_db_path
 AUTHORITIES = ["EASA", "CAAS", "CAAC"]
 
+# Known terminology mappings for ambiguous or shorthand terms that don't
+# appear verbatim in the regulatory text itself, but are how practitioners
+# commonly refer to a role/concept. Sourced from domain knowledge, not a
+# regulatory citation — used only to widen retrieval and give agents a hint
+# to investigate, never as a substitute for grounding the final answer in
+# actual retrieved text. Add to this as you confirm more mappings.
+DOMAIN_TERM_HINTS = {
+    "part-is manager": [
+        "Information Security Manager",
+        "ISM-IS",
+        "Compliance Monitoring Manager Part-IS",
+        "CMM-IS",
+    ],
+}
+
+
+def _expand_query_synonyms(question: str) -> List[str]:
+    """If the question contains a known shorthand/ambiguous term, add extra
+    search queries substituting its likely real-document equivalents —
+    increases retrieval recall for terms practitioners use that don't
+    appear verbatim in the source text."""
+    q_lower = question.lower()
+    extra_queries = []
+    for term, synonyms in DOMAIN_TERM_HINTS.items():
+        if term in q_lower:
+            for synonym in synonyms:
+                extra_queries.append(re.sub(term, synonym, q_lower, flags=re.IGNORECASE))
+    return extra_queries
+
+
+def _terminology_hint_block(question: str) -> str:
+    """Build a short note for agent prompts about any known terminology
+    mapping relevant to this question, so agents can draw the connection
+    explicitly instead of missing it — while still being told to ground
+    any claim in the actual retrieved text, not this hint alone."""
+    q_lower = question.lower()
+    hints = [
+        f'- "{term}" is commonly used by practitioners to refer to: '
+        f'{", ".join(synonyms)}. This is a terminology hint, not a fact —'
+        f" only state this connection if the retrieved text actually"
+        f" supports it."
+        for term, synonyms in DOMAIN_TERM_HINTS.items()
+        if term in q_lower
+    ]
+    return "\n".join(hints)
+
 worker_llm = ChatOllama(
     model=settings.worker_model,
     base_url=settings.ollama_host,
@@ -87,7 +133,13 @@ def strip_think(text: str) -> str:
 def extract_json(text: str) -> dict:
     for candidate in (strip_think(text), text):
         cleaned = re.sub(r"```json|```", "", candidate).strip()
-        match = re.search(r"\{.*?\}", cleaned, flags=re.DOTALL)
+        # Greedy match — grabs from the first '{' to the LAST '}' in the
+        # text, which is what you want for extracting one flat JSON object.
+        # A lazy match (`\{.*?\}`) stops at the FIRST '}' it finds, which
+        # truncates and fails if the JSON's own string values (e.g. the
+        # verifier's "reason" text) happen to contain a '}' character
+        # anywhere before the real end.
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
         if not match:
             continue
         try:
@@ -101,7 +153,6 @@ def extract_verification_result(text: str) -> dict:
     parsed = extract_json(text)
     if not parsed:
         return {}
-
     try:
         result = VerificationResult.model_validate(parsed)
         return result.model_dump()
@@ -111,7 +162,6 @@ def extract_verification_result(text: str) -> dict:
         retry_authority = str(parsed.get("retry_authority") or "ALL").upper()
         if retry_authority not in {"ALL", "EASA", "CAAS", "CAAC"}:
             retry_authority = "ALL"
-
         return {
             "approved": bool(parsed.get("approved", False)),
             "reason": reason,
@@ -182,6 +232,12 @@ def plan_node(state: RAGState) -> RAGState:
     else:
         sub_queries = [state["question"]]
 
+    # Widen retrieval with known terminology synonyms (see
+    # DOMAIN_TERM_HINTS) — e.g. a question about "Part-IS Manager" also
+    # searches for "Information Security Manager", since practitioners'
+    # shorthand often doesn't appear verbatim in the source documents.
+    sub_queries = sub_queries + _expand_query_synonyms(state["question"])
+
     return {
         **state,
         "sub_queries": sub_queries[:4],
@@ -201,7 +257,7 @@ Source excerpts from {authority} documents:
 {context}
 
 Question: {question}
-
+{terminology_hints}
 Using ONLY the excerpts above, write a short finding (a few sentences) that
 answers the question from {authority}'s perspective, citing the specific
 document/section referenced. If the excerpts do not contain material
@@ -240,12 +296,16 @@ def authority_agents_node(state: RAGState) -> RAGState:
             }
             continue
 
+        hints = _terminology_hint_block(state["question"])
         resp = worker_llm.invoke(
             AUTHORITY_AGENT_PROMPT.invoke(
                 {
                     "authority": authority,
                     "context": context,
                     "question": state["question"],
+                    "terminology_hints": (
+                        f"\nKnown terminology notes:\n{hints}\n" if hints else ""
+                    ),
                 }
             )
         )
@@ -268,6 +328,13 @@ Combine them into a single answer for a QA/EHS engineer:
 - Explicitly note where authorities AGREE, where they CONFLICT, and where
   one authority has no relevant material.
 - Do not invent anything beyond what the specialist findings state.
+- Each authority uses its own role names and terminology (e.g. "Compliance
+  Monitoring Manager", "Accountable Manager", "Quality Manager", "Part-IS
+  Manager"). These are DIFFERENT roles unless a specialist finding
+  explicitly states they are the same. Never write "(also referred to as
+  X)" or treat two named roles as interchangeable unless that equivalence
+  is stated in the findings below — keep each authority's terminology
+  separate rather than merging distinct roles into one umbrella term.
 
 Question: {question}
 
@@ -331,10 +398,23 @@ Draft answer:
 Authorities involved:
 {authorities}
 
-Check whether the claims are supported by the context, whether conflicts
-were ignored, and whether the context is sufficient.
+Check:
+1. Does every specific claim (clause numbers, requirements, dates) in the
+   draft actually appear in the context? Flag anything that looks invented.
+2. Is there a conflict between authorities or chunks (e.g. an older vs
+   newer revision) that the draft ignored or misrepresented?
+3. Is the context sufficient to answer the question at all, or is it thin?
+4. Does the draft claim two differently-named roles, terms, or documents
+   are "the same as" or "also referred to as" each other? If so, does the
+   context actually state that equivalence anywhere, or did the draft
+   assume it? Different authorities using similar-sounding role names
+   (e.g. Compliance Monitoring Manager vs Accountable Manager vs Part-IS
+   Manager) are NOT automatically the same role — treat an unstated
+   equivalence as an invented claim, same as check 1.
 
-Respond ONLY with JSON:
+Keep your reasoning brief and focused — a few sentences per check above is
+enough, you do not need to restate the full context or draft back to
+yourself. Then respond ONLY with JSON:
 {{"approved": true, "reason": "short explanation", "retry_query": "", "retry_authority": "ALL"}}
 """
 )
@@ -390,6 +470,7 @@ def finalize_unverified_node(state: RAGState) -> RAGState:
     authority = authorities[0]
     finding = state["authority_findings"].get(authority, {})
     final_draft = finding.get("draft", "No relevant material found in the current corpus.")
+
     return {
         **state,
         "context_text": finding.get("context", ""),
@@ -456,7 +537,6 @@ def finalize_node(state: RAGState) -> RAGState:
             "answer_status": "REQUIRES_HUMAN_REVIEW",
             "corpus_version": state.get("corpus_version", settings.corpus_version),
         }
-
     return {
         **state,
         "final_answer": answer,
