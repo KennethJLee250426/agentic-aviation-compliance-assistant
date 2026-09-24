@@ -1,4 +1,6 @@
+import logging
 import os
+import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +16,9 @@ app = FastAPI(title="Aviation Regulatory Agentic RAG POC")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type"],
+allow_credentials=True,
+allow_methods=["GET", "POST"],
+allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -30,10 +32,31 @@ class QueryRequest(BaseModel):
     def validate_authority(cls, value: str) -> str:
         normalized = value.upper()
         allowed = {"ALL", "EASA", "CAAS", "CAAC"}
+
         if normalized not in allowed:
             raise ValueError("Unsupported authority")
+
         return normalized
 
+@app.get("/health/live")
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    if vectorstore is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector store is not loaded",
+        )
+
+    return {
+        "status": "ready",
+        "vectorstore_loaded": True,
+        "auth_required": settings.auth_required,
+        "corpus_version": settings.corpus_version,
+    }
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index():
@@ -80,6 +103,7 @@ async def query_rag(req: QueryRequest, auth=Depends(optional_auth)):
         return {
             "answer": result.get("final_answer", ""),
             "answer_status": result.get("answer_status", "UNKNOWN"),
+            "corpus_version": result.get("corpus_version", settings.corpus_version,),
             "sources": result.get("context_text", ""),
             "needs_review": bool(result.get("needs_review", False)),
             "verification": result.get("verification", {}),
@@ -92,11 +116,21 @@ async def query_rag(req: QueryRequest, auth=Depends(optional_auth)):
                 for authority, finding in result.get("authority_findings", {}).items()
             },
         }
-    except Exception:
-        raise HTTPException(status_code=500, detail="Request failed. See server logs.")
+       except Exception:
+        error_id = str(uuid.uuid4())
+        logging.exception("Query failed: %s", error_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Request failed. Reference ID: {error_id}",
+        )
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app_api:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run(
+    "app_api:app",
+    host="0.0.0.0",
+    port=8000,
+    reload=False,
+)
