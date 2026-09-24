@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -24,11 +25,24 @@ def _bool_env(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def resolve_vector_db_path() -> str:
+    configured = os.getenv("VECTOR_DB_PATH")
+    if configured:
+        return configured
+
+    current_file = Path("indexes/current.txt")
+    if current_file.exists():
+        corpus_version = current_file.read_text(encoding="utf-8").strip()
+        return str(Path("indexes") / corpus_version)
+
+    return "./regulatory_chroma_db"
+
+
 settings = Settings(
     allowed_origins=_split_csv(os.getenv("ALLOWED_ORIGINS"), "http://localhost:8000"),
     auth_required=_bool_env("AUTH_REQUIRED", False),
     ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-    vector_db_path=os.getenv("VECTOR_DB_PATH", "./regulatory_chroma_db"),
+    vector_db_path=resolve_vector_db_path(),
     log_level=os.getenv("LOG_LEVEL", "INFO"),
     corpus_version=os.getenv("CORPUS_VERSION", "2026-09-24"),
 )
