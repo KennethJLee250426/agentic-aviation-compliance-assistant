@@ -1,8 +1,7 @@
-from typing import Optional
 import secrets
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config import settings
 
@@ -10,7 +9,7 @@ security = HTTPBearer(auto_error=False)
 
 
 async def optional_auth(
-    creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    creds: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict | None:
     """Allow local dev without auth while enforcing a real token check in production."""
     if not settings.auth_required:

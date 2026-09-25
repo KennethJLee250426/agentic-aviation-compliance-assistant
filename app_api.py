@@ -1,23 +1,30 @@
-import os
 import asyncio
 import logging
+import os
 
-from fastapi import Depends, FastAPI, HTTPException, status, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
 from auth import optional_auth
 from config import settings
-from graph import run_query, vectorstore
+from graph import query_vector_db, run_compliance_rag
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Aviation Regulatory Agentic RAG POC")
 
+allowed_origins = getattr(
+    settings,
+    "allowed_origins",
+    getattr(settings, "ALLOWED_ORIGINS", ["*"])
+
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins,
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
@@ -35,6 +42,8 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=4000)
     authority: str = "ALL"
     skip_verification: bool = False
+    provider: str | None = Field(default=None, description="Preferred LLM provider (e.g. gemini, openai, anthropic, ollama)")
+    model: str | None = Field(default=None, description="Specific model string (e.g. gpt-4o, claude-3-5-sonnet-20241022, gemini-2.5-flash)")
 
     @field_validator("authority")
     @classmethod
@@ -46,11 +55,18 @@ class QueryRequest(BaseModel):
         return normalized
 
 
+def _read_template_file(filepath: str) -> str:
+    """Helper sync function for thread-safe file reading."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 @app.get("/", response_class=HTMLResponse)
 async def read_index():
     if os.path.exists("templates/index.html"):
-        with open("templates/index.html", "r", encoding="utf-8") as f:
-            return f.read()
+        # Fix ASYNC230: Read template off the main event loop thread
+        content = await asyncio.to_thread(_read_template_file, "templates/index.html")
+        return content
     return "<h3>Error: templates/index.html not found!</h3>"
 
 
@@ -61,7 +77,7 @@ async def health_live():
 
 @app.get("/health/ready")
 async def health_ready():
-    if vectorstore is None:
+    if query_vector_db is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Vector store is not loaded",
@@ -75,12 +91,13 @@ async def health_ready():
     }
 
 
+# Fix B008: Add noqa annotation for standard FastAPI Depends parameter default
 @app.post("/api/query")
-async def query_rag(req: QueryRequest, request: Request, auth=Depends(optional_auth)):
+async def query_rag(req: QueryRequest, request: Request, auth=Depends(optional_auth)):  # noqa: B008
     if getattr(settings, 'auth_required', False) and auth is None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    if vectorstore is None:
+    if query_vector_db is None:
         raise HTTPException(
             status_code=400,
             detail="Vector database not found. Please run ingest.py first.",
@@ -98,10 +115,17 @@ async def query_rag(req: QueryRequest, request: Request, auth=Depends(optional_a
                 return Response(status_code=499) # Client Closed Request
 
             # 3. Prevent Event Loop Blocking & Enforce Timeouts
-            # run_query is synchronous/blocking. to_thread pushes it to a worker thread.
+            # Pass user's requested provider and model to the RAG pipeline
             result = await asyncio.wait_for(
-                asyncio.to_thread(run_query, req.question, req.authority, req.skip_verification),
-                timeout=QUERY_TIMEOUT_SECONDS
+                asyncio.to_thread(
+                    run_compliance_rag,
+                    req.question,
+                    req.authority,
+                    req.skip_verification,
+                    req.provider,
+                    req.model,
+                ),
+                timeout=QUERY_TIMEOUT_SECONDS,
             )
 
             return {
@@ -121,15 +145,15 @@ async def query_rag(req: QueryRequest, request: Request, auth=Depends(optional_a
             }
 
         except asyncio.TimeoutError:
-            logger.error(f"Query timed out after {QUERY_TIMEOUT_SECONDS} seconds.")
+            logger.error("Query timed out after %s seconds.", QUERY_TIMEOUT_SECONDS)
             raise HTTPException(status_code=504, detail="Request timed out while generating response.")
         
         except asyncio.CancelledError:
             logger.warning("Request cancelled by client mid-execution.")
             raise  # FastAPI handles CancelledError internally
             
-        except Exception as e:
-            logger.error(f"Query execution failed: {e}", exc_info=True)
+        except Exception:
+            logger.exception("Query execution failed.")
             raise HTTPException(status_code=500, detail="Request failed. See server logs.")
 
 if __name__ == "__main__":

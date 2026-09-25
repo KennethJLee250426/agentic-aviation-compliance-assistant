@@ -1,8 +1,10 @@
-# Python
+# Python / Testing
 __pycache__/
 *.pyc
 venv/
 .venv/
+.pytest_cache/
+.coverage
 
 # Vector DB (regenerate via ingest.py)
 regulatory_chroma_db/
@@ -17,8 +19,15 @@ regulations/caac/*
 !regulations/caac/.gitkeep
 
 # Environment/secrets
+# Environment/secrets
 .env
+.env.*
+*.key
+*.pem
 
-# OS/editor cruft
+# OS / Editor / IDE cruft
 .DS_Store
-.vscode/
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
