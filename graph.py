@@ -72,8 +72,11 @@ verifier_llm = ChatOllama(
 # PRODUCTION NOTE: Replaced regex JSON extraction with strict Pydantic schemas
 class DecompositionPlan(BaseModel):
     """Schema for query decomposition in plan_node."""
-    sub_queries: List[str] = Field(
-        ..., min_length=1, description="List of sub-queries broken down from the main question."
+    sub_queries: List[constr(max_length=200)] = Field(
+        ..., 
+        min_length=1, 
+        max_length=4, # Hard limit: Max 4 subqueries
+        description="List of sub-queries broken down from the main question. Maximum length 200 chars each."
     )
 
 class Citation(BaseModel):
