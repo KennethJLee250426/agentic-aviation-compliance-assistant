@@ -15,25 +15,26 @@ litellm.drop_params = True
 def resolve_model_and_provider(
     provider: str | None = None,
     model: str | None = None,
-    default_model: str = "gemini/gemini-2.5-flash",
+    default_model: str = "gemini/gemini-embedding-001",
 ) -> tuple[str, str | None]:
     """
-    Resolves the model string and custom_llm_provider for LiteLLM.
-    Ensures Gemini models always carry the 'gemini/' prefix to bypass Vertex AI fallbacks.
+    Resolves the embedding model string and custom_llm_provider for LiteLLM.
+    Mirrors resolve_model_and_provider but for embedding calls.
     """
-    target_model = model or getattr(settings, "DEFAULT_LLM_MODEL", default_model)
+    target_model = model or getattr(settings, "EMBEDDING_MODEL", default_model)
 
     if provider and not model:
         provider_lower = provider.lower()
         provider_defaults = {
-            "openai": "gpt-4o",
-            "anthropic": "anthropic/claude-3-5-sonnet",
-            "gemini": "gemini/gemini-2.5-flash",
-            "ollama": "ollama/llama3.1:8b",
+            "openai": "text-embedding-3-small",
+            "gemini": "gemini/gemini-embedding-001",
+            "cohere": "cohere/embed-english-v3.0",
+            "mistral": "mistral/mistral-embed",
+            "ollama": "ollama/nomic-embed-text",
+            "bedrock": "bedrock/amazon.titan-embed-text-v2:0",
         }
         target_model = provider_defaults.get(provider_lower, target_model)
 
-    # Determine custom_llm_provider for LiteLLM
     model_lower = target_model.lower()
     custom_provider = None
 
@@ -41,44 +42,54 @@ def resolve_model_and_provider(
         if not target_model.startswith("gemini/"):
             target_model = f"gemini/{target_model}"
         custom_provider = "gemini"
-    elif "gpt" in model_lower or "openai" in model_lower or provider == "openai":
+    elif "text-embedding" in model_lower or "ada-002" in model_lower or provider == "openai":
         custom_provider = "openai"
-    elif "claude" in model_lower or "anthropic" in model_lower or provider == "anthropic":
-        custom_provider = "anthropic"
+    elif "cohere" in model_lower or provider == "cohere":
+        custom_provider = "cohere"
+    elif "mistral" in model_lower or provider == "mistral":
+        custom_provider = "mistral"
     elif "ollama" in model_lower or provider == "ollama":
         custom_provider = "ollama"
+    elif "bedrock" in model_lower or provider == "bedrock":
+        custom_provider = "bedrock"
 
     return target_model, custom_provider
 
 
-def query_vector_db(query_text: str, top_k: int = 5):
+def resolve_embedding_model(
+    provider: str | None = None,
+    model: str | None = None,
+    default_model: str = "gemini/gemini-embedding-001",
+) -> tuple[str, str | None]:
+    """Backwards-compatible wrapper for embedding call provider resolution."""
+    return resolve_model_and_provider(provider=provider, model=model, default_model=default_model)
+
+
+def query_vector_db(query_text: str, top_k: int = 5, provider: str | None = None, model: str | None = None):
     """Retrieve top-k regulatory chunks matching the query embedding."""
     client = chromadb.PersistentClient(path=settings.VECTOR_DB_PATH)
     collection = client.get_or_create_collection(name="aviation_regulations")
 
-    # Ensure embedding model carries gemini/ prefix for AI Studio compatibility
-    raw_embed_model = getattr(settings, "EMBEDDING_MODEL", "gemini/text-embedding-004")
-    embed_model, custom_provider = resolve_model_and_provider(
-        model=raw_embed_model,
-        default_model="gemini/text-embedding-004",
-    )
+    embed_model, embed_provider = resolve_embedding_model(provider=provider, model=model)
 
-    active_key = getattr(settings, "GEMINI_API_KEY", None)
+    active_key = None
+    if embed_provider == "gemini":
+        active_key = getattr(settings, "GEMINI_API_KEY", None)
+    elif embed_provider == "openai":
+        active_key = getattr(settings, "OPENAI_API_KEY", None)
+    elif embed_provider == "cohere":
+        active_key = getattr(settings, "COHERE_API_KEY", None)
+    elif embed_provider == "mistral":
+        active_key = getattr(settings, "MISTRAL_API_KEY", None)
 
-    # Call LiteLLM embedding
     response = embedding(
         model=embed_model,
-        custom_llm_provider=custom_provider,
         input=[query_text],
         api_key=active_key if active_key else None,
     )
     query_vec = response.data[0]["embedding"]
 
-    results = collection.query(
-        query_embeddings=[query_vec],
-        n_results=top_k,
-    )
-
+    results = collection.query(query_embeddings=[query_vec], n_results=top_k)
     docs = results.get("documents", [[]])[0] if results.get("documents") else []
     metadatas = results.get("metadatas", [[]])[0] if results.get("metadatas") else []
     return docs, metadatas
