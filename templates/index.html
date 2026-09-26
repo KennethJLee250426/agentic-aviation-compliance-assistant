@@ -385,10 +385,7 @@
                     <option value="CAAC">CAAC only</option>
                 </select>
             </div>
-            <label class="fast-mode-label">
-                <input type="checkbox" id="fast-mode-checkbox" />
-                Fast mode (skip verification)
-            </label>
+            <p class="fast-mode-label">An AI verifier checks answers against retrieved sources. Human review is still required.</p><label for="auth-token">Access token:</label><input type="password" id="auth-token" autocomplete="off" placeholder="Paste configured AUTH_TOKEN" />
         </div>
 
         <!-- Quick Prompt Suggestions -->
@@ -426,7 +423,6 @@
         const inputField = document.getElementById("user-input");
         const chatBox = document.getElementById("chat-box");
         const authoritySelect = document.getElementById("authority-select");
-        const fastModeCheckbox = document.getElementById("fast-mode-checkbox");
         
         const question = inputField.value.trim();
         if (!question) return;
@@ -442,11 +438,10 @@
         try {
             const response = await fetch("/api/query", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", "Authorization": "Bearer " + document.getElementById("auth-token").value },
                 body: JSON.stringify({
                     question: question,
                     authority: authoritySelect.value,
-                    skip_verification: fastModeCheckbox.checked
                 })
             });
 

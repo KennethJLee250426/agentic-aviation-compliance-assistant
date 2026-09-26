@@ -11,10 +11,11 @@ security = HTTPBearer(auto_error=False)
 async def optional_auth(
     creds: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> dict | None:
-    """Allow local dev without auth while enforcing a real token check in production."""
+    """Require a configured bearer token when authentication is enabled."""
     if not settings.auth_required:
         return {"user": "local-dev", "role": "admin"}
 
+    expected = settings.auth_token.strip()
     if creds is None or not creds.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -22,16 +23,7 @@ async def optional_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    expected = (settings.auth_token or "").strip()
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication is not configured for this environment",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    token = creds.credentials
-    if not secrets.compare_digest(token, expected):
+    if not secrets.compare_digest(creds.credentials, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",

@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -10,3 +11,6 @@ if str(root_dir) not in sys.path:
 
 # Load environment variables from .env before any app modules are imported
 load_dotenv(root_dir / ".env")
+if (len(os.environ.get("AUTH_TOKEN", "").strip()) < 32
+        or os.environ.get("AUTH_TOKEN", "").strip() == "change-me-in-production"):
+    os.environ["AUTH_TOKEN"] = "test-only-token-that-is-not-used-outside-pytest"
