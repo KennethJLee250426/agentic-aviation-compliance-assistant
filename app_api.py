@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from auth import optional_auth
 from config import settings
-from graph import query_vector_db, run_compliance_rag
+from graph import run_compliance_rag
 
 logger = logging.getLogger(__name__)
 
