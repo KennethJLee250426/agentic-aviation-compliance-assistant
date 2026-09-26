@@ -70,7 +70,7 @@ def query_vector_db(query_text: str, top_k: int = 5, provider: str | None = None
     client = chromadb.PersistentClient(path=settings.VECTOR_DB_PATH)
     collection = client.get_or_create_collection(name="aviation_regulations")
 
-    embed_model, embed_provider = resolve_embedding_model(provider=provider, model=model)
+    embed_model, embed_provider = resolve_embedding_model(provider, model)
 
     active_key = None
     if embed_provider == "gemini":
