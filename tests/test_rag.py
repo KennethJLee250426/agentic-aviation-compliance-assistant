@@ -7,10 +7,12 @@ def test_vector_db_query():
     assert isinstance(docs, list)
     assert isinstance(metadatas, list)
 
+
 def test_rag_pipeline_execution():
     """Verify RAG pipeline returns expected keys using default model."""
     result = run_compliance_rag(query="What are basic aviation safety rules?")
-    assert "query" in result
-    assert "answer" in result
-    assert "model_used" in result
-    assert "context_sources" in result
+    assert "final_answer" in result
+    assert "answer_status" in result
+    assert "context_text" in result
+    assert "sub_queries" in result
+    assert "all_relevant_authorities" in result

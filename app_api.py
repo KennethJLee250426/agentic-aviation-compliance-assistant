@@ -77,10 +77,11 @@ async def health_live():
 
 @app.get("/health/ready")
 async def health_ready():
-    if query_vector_db is None:
+    db_exists = os.path.exists(settings.VECTOR_DB_PATH)
+    if not db_exists:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vector store is not loaded",
+            detail="Vector store is not loaded. Please run ingest.py first.",
         )
 
     return {
@@ -97,7 +98,7 @@ async def query_rag(req: QueryRequest, request: Request, auth=Depends(optional_a
     if getattr(settings, 'auth_required', False) and auth is None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    if query_vector_db is None:
+    if not os.path.exists(settings.VECTOR_DB_PATH):
         raise HTTPException(
             status_code=400,
             detail="Vector database not found. Please run ingest.py first.",
