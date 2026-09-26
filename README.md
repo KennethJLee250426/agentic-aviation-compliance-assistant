@@ -1,290 +1,165 @@
-# Aviation Regulatory Agentic RAG (POC)
+# Aviation Regulatory Agentic RAG (Prototype)
 
-A local, privacy-preserving question-answering system for aviation
-regulatory documents (EASA, CAAS, CAAC). Everything runs on your own
-machine — no data leaves your laptop, no API keys, no cloud calls.
+A prototype question-answering system for aviation regulatory documents from EASA, CAAS, and CAAC. It uses a planner, regulator-specific retrieval agents, an answer synthesizer, and an AI verifier to draft answers from an indexed document collection.
 
-Instead of a single AI model answering from a single search, this system
-uses several small AI models working together as "agents": one plans the
-search, one specialist per regulator checks its own documents, one
-combines their findings, and one double-checks the final answer before
-you see it.
+## Data and model-provider behavior
 
----
+The default configuration uses Gemini for both chat and embeddings. Prompts and retrieved document excerpts are sent to the configured model provider. Ollama can be configured for local inference; the application is not local-only by default.
 
-## 1. What you need before you start
+The generated vector index is stored locally. Keep source documents and generated indexes out of Git unless you have permission and a specific reason to publish them.
 
-You don't need to know Python or AI to get this running — just follow
-the steps in order.
+## Requirements
 
-| Requirement | Why | Notes |
-|---|---|---|
-| A computer with a decent GPU (8GB+ VRAM recommended) | The AI models run locally and need graphics memory | Works on CPU only too, but much slower |
-| [Python 3.10 or newer](https://www.python.org/downloads/) | Runs the application code | Check with `python --version` |
-| [Ollama](https://ollama.com/download) | Runs the AI models locally | Free, install like any normal app |
-| Your regulatory documents (PDF, XML, Docx, etc) | The content the system answers questions from | See folder structure below |
+- Python 3.10 or newer
+- Regulatory source documents that you are authorized to use
+- A model provider and its API key, or a configured local Ollama installation
+- Ollama is optional when using a cloud provider
 
----
+## 1. Install the project
 
-## 2. Install Ollama and download the models
+Open a terminal in the project directory and create a virtual environment:
 
-Ollama is the program that actually runs the AI models on your machine.
-Once it's installed, open a terminal (Command Prompt / PowerShell on
-Windows, Terminal on Mac/Linux) and download the two models this project
-uses:
+    python -m venv .venv
 
-```bash
-ollama pull llama3.1:8b
-ollama pull deepseek-r1:8b
-```
+Activate it:
 
-This downloads about 5GB per model, so it may take a while depending on
-your internet connection. You only need to do this once.
+    # Windows PowerShell
+    .venv\Scripts\Activate.ps1
 
-### If you have a smaller GPU (8GB VRAM or less)
+    # macOS or Linux
+    source .venv/bin/activate
 
-Both models together are too large to fit in VRAM at the same time on an
-8GB card. That's fine — the system is built to work around this — but
-you should tell Ollama to fully swap out one model before loading the
-other, rather than trying (and struggling) to fit both:
+Install dependencies:
 
-**Mac/Linux**, before starting Ollama:
-```bash
-export OLLAMA_MAX_LOADED_MODELS=1
-ollama serve
-```
+    pip install -r requirements.txt
 
-**Windows**: set `OLLAMA_MAX_LOADED_MODELS` to `1` under
-*System Properties → Environment Variables*, then restart the Ollama
-service (or restart your computer).
+## 2. Configure the application
 
-You can check this is working by running `ollama ps` while a question is
-being answered — it should only ever show one model loaded at a time.
+Copy the example environment file:
 
----
+    # Windows PowerShell
+    Copy-Item .env.example .env
 
-## 3. Set up the project
+    # macOS or Linux
+    cp .env.example .env
 
-Download/clone this project folder, then open a terminal inside it and
-run:
+Set a unique AUTH_TOKEN with at least 32 characters. One way to generate one is:
 
-```bash
-# create an isolated Python environment (recommended, avoids conflicts)
-python -m venv venv
+    python -c "import secrets; print(secrets.token_urlsafe(32))"
 
-# activate it
-source venv/bin/activate        # Mac/Linux
-venv\Scripts\activate           # Windows
+Put the generated value in .env. The app refuses to start with an empty, short, or example authentication token when AUTH_REQUIRED is enabled.
 
-# install the required Python packages
-pip install -r requirements.txt
-```
+The default models use Gemini. Set GEMINI_API_KEY in .env to use them. For a different provider, configure a compatible chat model, embedding provider/model, and required credentials. The chat model and embedding model are separate settings.
 
----
+Optional role-specific model settings are available:
 
-## 4. Add your documents
+- PLANNER_LLM_MODEL
+- SPECIALIST_LLM_MODEL
+- AGGREGATOR_LLM_MODEL
+- VERIFIER_LLM_MODEL
 
-Create this folder structure inside the project (if it doesn't already
-exist) and drop your regulatory documents (PDF or XML) into the matching
-authority's folder:
+Leave these blank to use DEFAULT_LLM_MODEL for every role. You can also set ALLOWED_ORIGINS, MAX_CONCURRENT_QUERIES, QUERY_TIMEOUT_SECONDS, and QUEUE_TIMEOUT_SECONDS in .env.
 
-```
-regulations/
-├── easa/
-│   └── (EASA PDFs/XML files go here)
-├── caas/
-│   └── (CAAS PDFs/XML files go here)
-└── caac/
-    └── (CAAC PDFs/XML files go here)
-```
+## 3. Add regulatory documents
 
-Then build the searchable database from these documents:
+Place documents in the matching authority folder:
 
-```bash
-python ingest.py
-```
+    regulations/
+    ├── easa/
+    ├── caas/
+    └── caac/
 
-You'll see progress messages as it reads, splits, and indexes your
-documents. This creates a `regulatory_chroma_db/` folder — that's your
-local database. Re-run `ingest.py` any time you add or change documents.
-
----
-
-## 5. Start the app
-
-Make sure Ollama is running in the background, then:
-
-```bash
-python app_api.py
-```
-
-You should see a message that the server is running. Open your browser
-to:
-
-```
-http://localhost:8000
-```
-
-If a `templates/index.html` file exists in the project, you'll see a
-simple chat-style web page with:
-- an **authority filter** dropdown (ALL, EASA, CAAS, or CAAC only)
-- a **fast mode** checkbox — ticks `skip_verification` on for that
-  question (see Section 8)
-- answers that highlight in yellow with a "⚠️ Needs human review" badge
-  whenever the verifier couldn't fully confirm them
-- a collapsible **"Per-authority findings"** section under each answer,
-  showing what each regulator's specialist found individually before
-  being combined
-
-If there's no `templates/index.html`, you can still send questions
-directly via the API (see below) — the web page is just a convenience.
-
-### Stopping the app
-
-Go back to the terminal where it's running and press `Ctrl+C`. This shuts
-down the server cleanly. This does **not** stop Ollama or unload the AI
-models — Ollama keeps running in the background as its own service.
-
----
-
-## 6. Asking questions
-
-If there's no web page, or you want to script/test it directly, send a
-question to the API. From a terminal:
-
-```bash
-curl -X POST http://localhost:8000/api/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What are the record-keeping requirements for engine component repair?"}'
-```
-
-Or from Python:
-
-```python
-import requests
-
-response = requests.post(
-    "http://localhost:8000/api/query",
-    json={"question": "What are the record-keeping requirements for engine component repair?"},
-)
-print(response.json()["answer"])
-```
-
-### Request options
-
-| Field | Default | What it does |
-|---|---|---|
-| `question` | *(required)* | Your question, in plain English |
-| `authority` | `"ALL"` | Limit the search to one regulator: `"EASA"`, `"CAAS"`, or `"CAAC"` |
-| `skip_verification` | `false` | Skip the double-check step for faster (but unverified) answers — see [Section 8](#8-understanding-the-response) |
-
-### Example response
-
-```json
-{
-  "answer": "...",
-  "sources": "...",
-  "needs_review": false,
-  "verification": {"approved": true, "reason": "...", "retry_query": "", "retry_authority": ""},
-  "retry_count": 0,
-  "sub_queries": ["..."],
-  "relevant_authorities": ["EASA", "CAAS", "CAAC"],
-  "authority_findings": {"EASA": "...", "CAAS": "...", "CAAC": "..."}
-}
-```
-
----
-
-## 7. How it works (the "agentic" part)
-
-Rather than one AI model doing everything in one pass, your question goes
-through several stages, each handled by a specialised step:
-
-```
-Your question
-     │
-     ▼
- 1. Planner ──────────► decides if this is a simple question or needs
-     │                   breaking into multiple search queries, and which
-     │                   regulators (EASA/CAAS/CAAC) are relevant
-     ▼
- 2. Specialist agents ─► one per relevant regulator — each searches ONLY
-     │                   that regulator's documents and writes a finding
-     │                   scoped to what it found (or says plainly if it
-     │                   found nothing relevant)
-     ▼
- 3. Aggregator ───────► combines the specialists' findings into one
-     │                   answer, calling out where regulators agree,
-     │                   disagree, or are silent
-     ▼
- 4. Verifier ─────────► double-checks the combined answer actually
-     │                   matches the source documents, catching invented
-     │                   citations or missed conflicts
-     ▼
-  If the verifier isn't satisfied, it sends the process back to step 2
-  with a more targeted search (up to 2 retries) before finalizing.
-     ▼
-  Final answer, with a "⚠️ Needs human review" flag if verification
-  was never able to fully confirm it.
-```
-
-Two different AI models are used for this:
-- **Llama 3.1** handles the planning, searching, and drafting (steps 1–3)
-- **DeepSeek-R1** handles the verification (step 4), since it's tuned for
-  careful, step-by-step reasoning
-
----
-
-## 8. Understanding the response
-
-- **`needs_review: true`** means the automated verifier couldn't fully
-  confirm the answer against the source documents — treat it as a
-  starting point, not a final answer, and check the cited sources
-  yourself.
-- **`sources`** shows the exact document excerpts the answer was based
-  on — always worth a quick look for anything going into real compliance
-  work.
-- **`authority_findings`** lets you see what each regulator's specialist
-  found individually, before they were combined — useful for spotting
-  exactly where a conflict between regulators comes from.
-- **`skip_verification: true`** skips step 4 entirely for a faster
-  response, but only when the system judges it low-risk (a single
-  regulator, with matching documents found, and a simple non-comparison
-  question). For anything you plan to rely on, leave this off.
-
----
-
-## 9. Troubleshooting
-
-**"Vector database not found" error** — you haven't run `python
-ingest.py` yet, or it failed. Check that your documents are in the
-`regulations/easa|caas|caac/` folders and re-run it.
-
-**Answers are slow** — this is expected on a single consumer GPU running
-two 8B models locally; each question can take anywhere from several
-seconds to over a minute depending on complexity and your hardware.
-Setting `"skip_verification": true` for casual/exploratory questions will
-speed things up.
-
-**Answers say "No relevant [authority] material found"** — that
-regulator's folder has no documents covering that topic, or the wording
-of your question doesn't match the documents closely enough. Try
-rephrasing, or confirm the relevant PDF/XML is actually in that folder
-and was picked up by `ingest.py`.
-
-**Ollama seems to be using a lot of memory / running slowly** — confirm
-`OLLAMA_MAX_LOADED_MODELS=1` is set (see Section 2) so it isn't trying to
-keep both models loaded at once on a small GPU.
-
----
-
-## 10. License
-
-The code in this repository is licensed under the MIT License (see
-`LICENSE`). This covers the software only — it does **not** cover the
-regulatory documents you supply in `regulations/`, which remain the
-property of their respective issuing authorities (EASA, CAAS, CAAC) under
-their own terms. Check each authority's terms of use before redistributing
-their documents; some permit reproduction with attribution, others require
-written permission.
+The ingestion script supports PDF, DOCX, XML, TXT, and Markdown files. It extracts text and splits it into overlapping passages before generating embeddings. Scanned PDFs without extractable text need OCR before ingestion.
 
+## 4. Build the search index
+
+Run:
+
+    python ingest.py
+
+The index is written to indexes/<CORPUS_VERSION>, and indexes/current.txt is updated after a successful build. A manifest records the documents and chunk counts.
+
+Each corpus version is built once. If the index path already exists, set a new CORPUS_VERSION in .env before rebuilding. If a document fails to load or embed, the build does not become active; check the staging manifest reported by the script.
+
+The application uses the embedding provider and model configured during ingestion. Keep those settings the same when querying. If you change the embedding model, build a new corpus version with that model.
+
+## 5. Start the API and web interface
+
+Start the server:
+
+    python app_api.py
+
+Open http://localhost:8000. Enter the configured AUTH_TOKEN in the access-token field before submitting a question.
+
+The API provides:
+
+- GET /health/live — process liveness
+- GET /health/ready — checks that the configured Chroma collection exists and contains data
+- POST /api/query — generates an answer from the indexed documents
+
+## 6. Ask questions through the API
+
+Example using curl on macOS or Linux:
+
+    curl -X POST http://localhost:8000/api/query \
+      -H 'Content-Type: application/json' \
+      -H 'Authorization: Bearer YOUR_AUTH_TOKEN' \
+      -d '{"question":"What records are required for this maintenance activity?","authority":"EASA"}'
+
+In Windows PowerShell, use `Invoke-RestMethod`:
+
+    $headers = @{ Authorization = "Bearer YOUR_AUTH_TOKEN" }
+    $body = @{ question = "What records are required for this maintenance activity?"; authority = "EASA" } | ConvertTo-Json
+    Invoke-RestMethod -Method Post -Uri http://localhost:8000/api/query -Headers $headers -ContentType "application/json" -Body $body
+
+Request fields:
+
+| Field | Required | Description |
+|---|---:|---|
+| question | Yes | Question to answer; 3 to 4,000 characters |
+| authority | No | ALL, EASA, CAAS, or CAAC; defaults to ALL |
+| skip_verification | No | Skips the AI verifier when true; the answer still requires human review |
+
+The API also requires an Authorization: Bearer token header when AUTH_REQUIRED is enabled.
+
+Responses include the answer, retrieved source excerpts, authorities searched, specialist findings, retry count, and verifier result. The answer status is AGENT_REVIEWED when the AI verifier approves the draft, or NEEDS_HUMAN_REVIEW otherwise. needs_review remains true for every answer.
+
+## 7. Agent workflow
+
+Each request follows this sequence:
+
+1. **Planner:** creates focused retrieval queries and selects relevant authorities. Comparison questions search all three authorities.
+2. **Regulator specialists:** each selected authority agent searches only its own indexed passages and writes a finding with source IDs.
+3. **Aggregator:** combines the findings, preserving disagreements and gaps in the evidence.
+4. **Verifier:** checks claims and citations against the retrieved passages. If the verifier rejects the draft, the specialists and aggregator receive feedback for one revision.
+
+By default, the roles use the same model. Set the role-specific model settings in .env to route particular roles to different compatible models.
+
+## 8. Review and limitations
+
+The verifier is an automated model check. It does not certify compliance, replace a qualified reviewer, or guarantee that the index contains the latest or complete regulations. Check the cited source excerpts and the underlying official material before using an answer in compliance work.
+
+The quality of answers depends on the accuracy, currency, completeness, and extraction quality of the documents you index. This prototype does not establish regulatory applicability to a particular aircraft, organization, maintenance event, or jurisdiction.
+
+Setting skip_verification to true bypasses the verifier for that request. The answer remains marked as requiring human review.
+
+## Troubleshooting
+
+**The app refuses to start because of AUTH_TOKEN**  
+Set a unique token of at least 32 characters in .env. Do not use the example value.
+
+**The vector collection is missing or empty**  
+Check that supported documents are in the authority folders and run python ingest.py. If a corpus version already exists, choose a new CORPUS_VERSION.
+
+**Ingestion reports failed documents**  
+Review the staging manifest named in the error. Check file readability, extractable text, provider credentials, and provider limits.
+
+**Embedding dimension mismatch**  
+The embedding model used by the API must match the model that built the active index. Restore the previous embedding configuration or build a new corpus version.
+
+**A query times out or takes a long time**  
+The request may require several model calls: planning, retrieval and specialist work, synthesis, and verification. Check model-provider availability and adjust the timeout or model settings if needed.
+
+## License
+
+The software is licensed under the MIT License; see LICENSE. The license does not grant rights to redistribute regulatory source documents. Those remain subject to the terms of their issuing authorities.
