@@ -8,6 +8,9 @@ venv/
 
 # Vector DB (regenerate via ingest.py)
 regulatory_chroma_db/
+indexes/*/
+indexes/*-manifest.json
+!indexes/current.txt
 
 # Regulatory source documents — likely copyrighted/restricted, do not
 # publish. Only .gitkeep placeholders are tracked.
