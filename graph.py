@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 import chromadb
 import litellm
@@ -15,7 +16,7 @@ litellm.drop_params = True
 def resolve_model_and_provider(
     provider: str | None = None,
     model: str | None = None,
-    default_model: str = "gemini/gemini-2.5-flash",
+    default_model: str = "ollama/llama3.1:8b",
 ) -> tuple[str, str | None]:
     """
     Resolves the LLM completion model string and custom_llm_provider for LiteLLM.
@@ -52,7 +53,7 @@ def resolve_model_and_provider(
 def resolve_embedding_model(
     provider: str | None = None,
     model: str | None = None,
-    default_model: str = "gemini/gemini-embedding-001",
+    default_model: str = "ollama/nomic-embed-text",
 ) -> tuple[str, str | None]:
     """
     Resolves the embedding model string and custom_llm_provider for LiteLLM.
@@ -92,7 +93,24 @@ def resolve_embedding_model(
 
     return target_model, custom_provider
 
-def query_vector_db(query_text: str, top_k: int = 5, provider: str | None = None, model: str | None = None):
+
+def _build_where_filter(authority: str | None) -> dict[str, str] | None:
+    if not authority:
+        return None
+    normalized = authority.upper()
+    if normalized == "ALL":
+        return None
+    return {"authority": normalized}
+
+
+def query_vector_db(
+    query_text: str,
+    top_k: int = 5,
+    provider: str | None = None,
+    model: str | None = None,
+    authority: str = "ALL",
+    similarity_threshold: float | None = None,
+) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
     """Retrieve top-k regulatory chunks matching the query embedding."""
     client = chromadb.PersistentClient(path=settings.VECTOR_DB_PATH)
     collection = client.get_or_create_collection(name="aviation_regulations")
@@ -119,9 +137,6 @@ def query_vector_db(query_text: str, top_k: int = 5, provider: str | None = None
     query_vec = response.data[0]["embedding"]
 
     # --- Dimension safety check ---
-    # Chroma collections are locked to the dimension of whatever embedding
-    # model built them. If EMBEDDING_MODEL was swapped without re-running
-    # ingest.py, the new query vector won't match the stored vectors.
     if collection.count() > 0:
         sample = collection.peek(limit=1)
         existing_embeddings = sample.get("embeddings")
@@ -138,14 +153,52 @@ def query_vector_db(query_text: str, top_k: int = 5, provider: str | None = None
                     f"new model, or revert EMBEDDING_MODEL to match the existing data."
                 )
 
-    results = collection.query(
-        query_embeddings=[query_vec],
-        n_results=top_k,
-    )
+    query_kwargs: dict[str, Any] = {
+        "query_embeddings": [query_vec],
+        "n_results": top_k,
+    }
+    where_filter = _build_where_filter(authority)
+    if where_filter:
+        query_kwargs["where"] = where_filter
+
+    results = collection.query(**query_kwargs)
 
     docs = results.get("documents", [[]])[0] if results.get("documents") else []
     metadatas = results.get("metadatas", [[]])[0] if results.get("metadatas") else []
-    return docs, metadatas
+    distances = results.get("distances", [[]])[0] if results.get("distances") else []
+
+    threshold = similarity_threshold
+    if threshold is None:
+        threshold = getattr(settings, "RAG_SIMILARITY_THRESHOLD", 0.75)
+
+    # For cosine distance, smaller is better. Similarity ~ 1 - distance.
+    max_distance = 1.0 - max(0.0, min(1.0, float(threshold)))
+
+    filtered_docs: list[str] = []
+    filtered_metadatas: list[dict[str, Any]] = []
+    filtered_distances: list[float] = []
+
+    for idx, doc in enumerate(docs):
+        distance = distances[idx] if idx < len(distances) else None
+        if distance is not None and distance > max_distance:
+            continue
+        filtered_docs.append(doc)
+        filtered_metadatas.append(metadatas[idx] if idx < len(metadatas) else {})
+        if distance is not None:
+            filtered_distances.append(distance)
+
+    retrieval_stats: dict[str, Any] = {
+        "authority_filter": authority.upper(),
+        "requested_top_k": top_k,
+        "returned_before_threshold": len(docs),
+        "returned_after_threshold": len(filtered_docs),
+        "similarity_threshold": threshold,
+    }
+    if filtered_distances:
+        retrieval_stats["max_distance_after_threshold"] = max(filtered_distances)
+        retrieval_stats["min_distance_after_threshold"] = min(filtered_distances)
+
+    return filtered_docs, filtered_metadatas, retrieval_stats
 
 
 def run_compliance_rag(
@@ -157,9 +210,13 @@ def run_compliance_rag(
     api_key: str | None = None,
 ) -> dict:
     """Execute RAG pipeline with flexible authority filtering and multi-provider selection."""
-    
-    # 1. Retrieve Relevant Regulatory Context
-    docs, metadatas = query_vector_db(query, top_k=getattr(settings, "RAG_TOP_K", 5))
+
+    docs, metadatas, retrieval_stats = query_vector_db(
+        query,
+        top_k=getattr(settings, "RAG_TOP_K", 5),
+        provider=provider,
+        authority=authority,
+    )
 
     if docs:
         context_str = "\n\n".join([
@@ -169,10 +226,8 @@ def run_compliance_rag(
     else:
         context_str = "No specific regulatory context retrieved from the database."
 
-    # 2. Resolve Model and Custom Provider
     target_model, custom_provider = resolve_model_and_provider(provider, model)
 
-    # 3. Resolve API Key Dynamically
     active_key = api_key
     if not active_key:
         if custom_provider == "gemini":
@@ -189,7 +244,6 @@ def run_compliance_rag(
 
     user_prompt = f"Target Authority: {authority}\nRegulatory Context:\n{context_str}\n\nUser Question: {query}"
 
-    # 4. Call LiteLLM Completion
     completion_kwargs = {
         "model": target_model,
         "messages": [
@@ -205,16 +259,16 @@ def run_compliance_rag(
     response = completion(**completion_kwargs)
     final_answer = response.choices[0].message.content
 
-    # 5. Return dict structured for app_api.py response formatting
     return {
         "final_answer": final_answer,
         "answer_status": "COMPLETED",
         "context_text": context_str,
         "needs_review": False,
-        "verification": {"passed": True},
+        "verification": {"passed": True, "skipped": skip_verification},
         "retry_count": 0,
         "sub_queries": [query],
         "all_relevant_authorities": [authority],
         "corpus_version": getattr(settings, "corpus_version", "UNKNOWN"),
         "authority_findings": {},
+        "retrieval_stats": retrieval_stats,
     }
